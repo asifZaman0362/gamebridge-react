@@ -1,10 +1,10 @@
 import { useCallback } from 'react';
-import type { Bridge, EventKey, EventMap } from '@gamebridge-react/core';
+import type { Bridge, EmitArgs, EventKey, EventMap } from '@gamebridge-react/core';
 
 /** A stable emit function for one bridge, typed to its event map. */
 export type BridgeEmit<Events extends EventMap> = <K extends EventKey<Events>>(
   event: K,
-  payload: Events[K],
+  ...args: EmitArgs<Events, K>
 ) => void;
 
 /**
@@ -21,9 +21,9 @@ export type BridgeEmit<Events extends EventMap> = <K extends EventKey<Events>>(
  * ```
  */
 export function useBridgeEmit<Events extends EventMap>(bridge: Bridge<Events>): BridgeEmit<Events> {
-  return useCallback(
-    (event, payload) => {
-      bridge.emit(event, payload);
+  return useCallback<BridgeEmit<Events>>(
+    (event, ...args) => {
+      bridge.emit(event, ...args);
     },
     [bridge],
   );

@@ -19,7 +19,8 @@ import { GenericTransport, isCountable, type EventTransport } from './transport'
 
 /**
  * Any event map. Keys are event names; values are that event's payload type.
- * Use `void` for events that carry no payload.
+ * Use `void` for events that carry no payload. Both `type` aliases and
+ * `interface` declarations are accepted.
  *
  * ```ts
  * type Events = {
@@ -28,7 +29,7 @@ import { GenericTransport, isCountable, type EventTransport } from './transport'
  * };
  * ```
  */
-export type EventMap = Record<string, unknown>;
+export type EventMap = object;
 
 /** The string keys of an event map. */
 export type EventKey<Events extends EventMap> = keyof Events & string;
@@ -37,6 +38,14 @@ export type EventKey<Events extends EventMap> = keyof Events & string;
 export type Handler<Events extends EventMap, K extends EventKey<Events>> = (
   payload: Events[K],
 ) => void;
+
+/**
+ * The payload argument list for an emit of event `K`: required when the
+ * event carries a payload, optional when it is declared `void` (or otherwise
+ * accepts `undefined`), so `emit('pause')` reads as it should.
+ */
+export type EmitArgs<Events extends EventMap, K extends EventKey<Events>> =
+  undefined extends Events[K] ? [payload?: Events[K]] : [payload: Events[K]];
 
 /** Removes a subscription. Safe to call more than once. */
 export type Unsubscribe = () => void;
@@ -92,7 +101,8 @@ export interface BridgeOptions<Events extends EventMap> {
   /**
    * Maximum retained payloads per `'queue'` event. When exceeded, the oldest
    * is dropped. Bounds memory when a subscriber never attaches — important
-   * when payloads are large or the producer is fast.
+   * when payloads are large or the producer is fast. `0` disables retention
+   * for every `'queue'` event.
    *
    * @defaultValue 256
    */
@@ -117,9 +127,13 @@ export interface BridgeOptions<Events extends EventMap> {
   name?: string;
 
   /**
-   * Invoked when a subscriber throws. Errors are always isolated so that one
-   * failing subscriber cannot prevent others from running; this hook decides
-   * where the failure is reported.
+   * Invoked when a subscriber throws, or when the transport itself fails
+   * during `emit` or `on`. Errors are always isolated so that one failing
+   * subscriber cannot prevent others from running and no failure escapes
+   * the bridge into the caller; this hook decides where it is reported.
+   *
+   * Receives the event name as declared in the map, without any `namespace`
+   * prefix. A hook that itself throws is swallowed.
    *
    * @defaultValue logs to the console
    */
@@ -144,12 +158,14 @@ export interface ListenOptions {
   label?: string;
 
   /**
-   * Whether to receive the backlog retained by a `'queue'` event.
+   * Whether this subscriber *consumes* a `'queue'` event.
    *
    * Defaults to `true`, because retaining a backlog is the entire purpose of
-   * declaring an event `'queue'`. Set to `false` for a subscriber that should
-   * observe only events emitted from now on — a diagnostic listener, say, that
-   * must not consume a backlog another subscriber is waiting for.
+   * declaring an event `'queue'`. Set to `false` for an observer — a
+   * diagnostic listener, say — that should see live emissions but must not
+   * consume a backlog another subscriber is waiting for. An observer does not
+   * receive the backlog on attach, and while only observers are attached,
+   * emissions are still retained for the consumer that mounts later.
    *
    * Has no effect on `'none'` or `'replay'` events.
    */
@@ -163,6 +179,8 @@ interface Subscription {
   context: object | undefined;
   /** Name shown in log records. */
   label: string;
+  /** Whether this subscriber counts as a consumer for `'queue'` semantics. */
+  consumes: boolean;
 }
 
 /**
@@ -254,15 +272,16 @@ export class Bridge<Events extends EventMap> {
 
   constructor(options: BridgeOptions<Events> = {}) {
     this.#onError = options.onError ?? defaultOnError;
-    // The default transport reports handler failures back through the bridge,
-    // so live-dispatch errors reach the logger alongside those raised during
-    // replay and drain. A supplied transport owns its own isolation, so its
-    // handler errors are reported wherever that transport was told to report
-    // them and do not appear in these records.
+    // Every handler is registered with the transport through an isolating
+    // wrapper (see `on`), so subscriber failures are caught by the bridge
+    // whatever the transport does. The default transport additionally reports
+    // failures of anything registered on it directly, outside the bridge.
     this.transport =
       options.transport ?? new GenericTransport((error, key) => this.#reportError(error, key));
     this.#buffer = options.buffer ?? {};
-    this.#maxQueued = options.maxQueued ?? 256;
+    this.#maxQueued = Number.isFinite(options.maxQueued)
+      ? Math.max(0, Math.floor(options.maxQueued as number))
+      : 256;
     this.#namespace = options.namespace === undefined ? '' : `${options.namespace}:`;
     this.name = options.name ?? options.namespace ?? 'bridge';
   }
@@ -320,31 +339,39 @@ export class Bridge<Events extends EventMap> {
    * Depending on the event's {@link BufferMode}, the payload may also be
    * retained for subscribers that attach later.
    *
-   * Handlers run synchronously, before this method returns.
+   * Handlers run synchronously, before this method returns. The payload
+   * argument may be omitted for events declared `void`.
+   *
+   * Never throws: subscriber and transport failures are routed to `onError`.
    */
-  emit<K extends EventKey<Events>>(event: K, payload: Events[K]): void {
+  emit<K extends EventKey<Events>>(event: K, ...args: EmitArgs<Events, K>): void {
+    const payload = args[0] as Events[K];
     const key = this.#key(event);
     const mode = this.#modeOf(event);
-    const subscribers = this.#subscriptions.get(key)?.length ?? 0;
+    const subscriptions = this.#subscriptions.get(key);
+    const subscribers = subscriptions?.length ?? 0;
     let disposition: Disposition = subscribers > 0 ? 'delivered' : 'dropped';
 
     if (mode === 'replay') {
       this.#retained.set(key, payload);
       if (subscribers === 0) disposition = 'retained';
-    } else if (mode === 'queue' && subscribers === 0) {
-      // Only retain what nobody received. Retaining delivered commands too
-      // would make a later subscriber re-run work already done.
-      const backlog = this.#queued.get(key);
-      if (backlog === undefined) {
-        this.#queued.set(key, [payload]);
-      } else {
-        if (backlog.length >= this.#maxQueued) {
-          backlog.shift();
-          this.#action(event, 'evict', { count: 1 });
+    } else if (mode === 'queue' && !this.#hasConsumer(subscriptions)) {
+      // Only retain what no consumer received. Retaining delivered commands
+      // too would make a later subscriber re-run work already done. Observers
+      // (`collectWaiting: false`) still get the live copy but do not count.
+      if (this.#maxQueued > 0) {
+        const backlog = this.#queued.get(key);
+        if (backlog === undefined) {
+          this.#queued.set(key, [payload]);
+        } else {
+          if (backlog.length >= this.#maxQueued) {
+            backlog.shift();
+            this.#action(event, 'evict', { count: 1 });
+          }
+          backlog.push(payload);
         }
-        backlog.push(payload);
+        disposition = 'queued';
       }
-      disposition = 'queued';
     }
 
     if (this.#logger !== undefined) {
@@ -358,7 +385,13 @@ export class Bridge<Events extends EventMap> {
       this.#write(record);
     }
 
-    this.transport.emit(key, payload);
+    // A transport can fail — an engine-owned emitter that has already been
+    // destroyed, say. That is the transport's failure, not the emitter's.
+    try {
+      this.transport.emit(key, payload);
+    } catch (error) {
+      this.#reportError(error, key);
+    }
   }
 
   /**
@@ -369,6 +402,10 @@ export class Bridge<Events extends EventMap> {
    * exists, the handler is invoked once per retained payload, in emission
    * order, and the backlog is then cleared — unless `collectWaiting` is
    * `false`.
+   *
+   * Never throws: a failing handler or transport is routed to `onError`, and
+   * if the transport refuses the subscription the returned disposer is a
+   * no-op.
    *
    * @returns A disposer. Calling it more than once is safe.
    */
@@ -388,23 +425,22 @@ export class Bridge<Events extends EventMap> {
       if (once) return () => {};
     }
 
-    // Deliver a retained command backlog, then clear it.
-    if (mode === 'queue' && collectWaiting) {
-      const backlog = this.#queued.get(key);
-      if (backlog !== undefined && backlog.length > 0) {
-        const pending = backlog.slice();
-        backlog.length = 0;
-        this.#action(event, 'drain', { count: pending.length });
-        for (const buffered of pending) {
-          this.#invoke(handler, buffered as Events[K], context, key);
-          if (once) return () => {};
-        }
+    // A one-shot consumer takes exactly one command from the backlog and
+    // leaves the rest for whoever subscribes next.
+    if (mode === 'queue' && collectWaiting && once) {
+      const first = this.#takeQueued(key, 1);
+      if (first.length > 0) {
+        this.#action(event, 'drain', { count: 1 });
+        this.#invoke(handler, first[0] as Events[K], context, key);
+        return () => {};
       }
     }
 
+    // Every handler goes through an isolating wrapper, so a throwing
+    // subscriber is contained whatever the transport does with exceptions.
     // `once` is implemented here rather than required of transports, so that
     // any object with emit/on/off qualifies as a backend.
-    let registered: (payload: Events[K]) => void = handler;
+    let registered: (payload: Events[K]) => void;
     if (once) {
       registered = (payload: Events[K]) => {
         this.#forget(key, handler, registered);
@@ -413,16 +449,37 @@ export class Bridge<Events extends EventMap> {
         this.#action(event, 'unsubscribe');
         this.#invoke(handler, payload, context, key);
       };
-      this.#remember(key, handler, registered);
+    } else {
+      registered = (payload: Events[K]) => this.#invoke(handler, payload, context, key);
     }
 
-    this.transport.on(key, registered as (payload: unknown) => void, context);
+    try {
+      this.transport.on(key, registered as (payload: unknown) => void, context);
+    } catch (error) {
+      this.#reportError(error, key);
+      return () => {};
+    }
+    this.#remember(key, handler, registered);
     this.#acquire(key, {
       registered: registered as Function,
       context,
       label: label ?? nameOf(handler),
+      consumes: collectWaiting,
     });
     this.#action(event, 'subscribe');
+
+    // Drain the backlog only now that the handler is registered: a command
+    // emitted from inside a drained handler then reaches it live, instead of
+    // being re-queued behind a subscriber that is about to exist.
+    if (mode === 'queue' && collectWaiting) {
+      const pending = this.#takeQueued(key);
+      if (pending.length > 0) {
+        this.#action(event, 'drain', { count: pending.length });
+        for (const buffered of pending) {
+          this.#invoke(handler, buffered as Events[K], context, key);
+        }
+      }
+    }
 
     let disposed = false;
     return () => {
@@ -457,11 +514,21 @@ export class Bridge<Events extends EventMap> {
     const key = this.#key(event);
 
     if (handler === undefined) {
-      const removed = this.#subscriptions.get(key)?.length ?? 0;
+      // Remove only what this bridge registered. A wholesale `transport.off(key)`
+      // would also strip listeners the engine itself holds on a shared emitter.
+      const existing = this.#subscriptions.get(key) ?? [];
       this.#registered.delete(key);
       this.#subscriptions.delete(key);
-      this.#safely(() => this.transport.off(key));
-      if (removed > 0) this.#action(event, 'unsubscribe', { count: removed });
+      for (const subscription of existing) {
+        this.#safely(() =>
+          this.transport.off(
+            key,
+            subscription.registered as (payload: unknown) => void,
+            subscription.context,
+          ),
+        );
+      }
+      if (existing.length > 0) this.#action(event, 'unsubscribe', { count: existing.length });
       return;
     }
 
@@ -505,6 +572,31 @@ export class Bridge<Events extends EventMap> {
     this.#queued.delete(key);
     this.#retained.delete(key);
     this.#action(event, 'clear');
+  }
+
+  /**
+   * Remove every subscription this bridge holds and discard every buffered
+   * payload, in one call.
+   *
+   * This is the "engine rebuilt" or "module unloaded" operation. An engine
+   * that is torn down and recreated — a hot reload, a React Strict Mode
+   * remount — must neither be driven by handlers registered for its
+   * predecessor nor receive commands and state intended for it. Prefer
+   * {@link Bridge.clear} when only the buffers are stale and the subscribers
+   * are still valid.
+   *
+   * Only subscriptions made through this bridge are removed; listeners the
+   * engine registered directly on a shared transport are untouched. Logging
+   * is left as configured, so the disposal itself is visible in the log.
+   *
+   * The bridge remains usable afterwards: new subscriptions and emissions
+   * behave as on a fresh instance.
+   */
+  dispose(): void {
+    for (const key of [...this.#subscriptions.keys()]) {
+      this.off(this.#unkey(key) as EventKey<Events>);
+    }
+    this.clear();
   }
 
   /* ---------------------------------------------------------------- */
@@ -561,7 +653,23 @@ export class Bridge<Events extends EventMap> {
   /* ---------------------------------------------------------------- */
 
   #key(event: string): string {
-    return `${this.#namespace}${event}`;
+    return this.#namespace === '' ? event : `${this.#namespace}${event}`;
+  }
+
+  /** Whether any attached subscriber counts as a consumer of a `'queue'` event. */
+  #hasConsumer(subscriptions: Subscription[] | undefined): boolean {
+    if (subscriptions === undefined) return false;
+    for (const subscription of subscriptions) if (subscription.consumes) return true;
+    return false;
+  }
+
+  /** Remove and return up to `count` payloads (all, by default) from a backlog. */
+  #takeQueued(key: string, count?: number): unknown[] {
+    const backlog = this.#queued.get(key);
+    if (backlog === undefined || backlog.length === 0) return [];
+    const taken = count === undefined ? backlog.splice(0) : backlog.splice(0, count);
+    if (backlog.length === 0) this.#queued.delete(key);
+    return taken;
   }
 
   #unkey(key: string): string {
@@ -571,7 +679,11 @@ export class Bridge<Events extends EventMap> {
   }
 
   #modeOf(event: string): BufferMode {
-    return this.#buffer[event] ?? 'none';
+    // Own-property lookup, so an event named like an Object.prototype member
+    // ('constructor', 'toString') cannot pick up a prototype value.
+    return Object.prototype.hasOwnProperty.call(this.#buffer, event)
+      ? (this.#buffer[event] ?? 'none')
+      : 'none';
   }
 
   #acquire(key: string, subscription: Subscription): void {
@@ -580,9 +692,10 @@ export class Bridge<Events extends EventMap> {
     else existing.push(subscription);
   }
 
-  #release(key: string, registered: Function, context: object | undefined): void {
+  /** @returns Whether a matching subscription was found and removed. */
+  #release(key: string, registered: Function, context: object | undefined): boolean {
     const existing = this.#subscriptions.get(key);
-    if (existing === undefined) return;
+    if (existing === undefined) return false;
     const index = existing.findIndex(
       (subscription) =>
         subscription.registered === registered &&
@@ -590,6 +703,7 @@ export class Bridge<Events extends EventMap> {
     );
     if (index !== -1) existing.splice(index, 1);
     if (existing.length === 0) this.#subscriptions.delete(key);
+    return index !== -1;
   }
 
   #namesFor(key: string): string[] {
@@ -635,17 +749,25 @@ export class Bridge<Events extends EventMap> {
    * Record a subscriber failure and hand it to `onError`. Always logged when
    * a logger is attached, verbose or not, since a silently failing subscriber
    * is exactly what logging is turned on to find.
+   *
+   * The hook is itself guarded: an error reporter that is momentarily broken
+   * must not turn a contained subscriber failure into an application failure.
    */
   #reportError(error: unknown, key: string): void {
+    const event = this.#unkey(key);
     if (this.#logger !== undefined) {
       this.#write({
         bus: this.name,
-        event: this.#unkey(key),
+        event,
         action: 'error',
         error: error instanceof Error ? error.message : String(error),
       });
     }
-    this.#onError(error, key);
+    try {
+      this.#onError(error, event);
+    } catch {
+      // The reporter is broken; there is nowhere left to report to.
+    }
   }
 
   #remember(key: string, handler: Function, wrapper: Function): void {
@@ -676,9 +798,11 @@ export class Bridge<Events extends EventMap> {
     context: object | undefined,
   ): void {
     this.#forget(key, handler, registered);
-    this.#release(key, registered as Function, context);
+    const released = this.#release(key, registered as Function, context);
     this.#safely(() => this.transport.off(key, registered as (payload: unknown) => void, context));
-    this.#action(event, 'unsubscribe');
+    // A `once` subscription that already fired has nothing left to remove;
+    // do not report a second unsubscribe for it.
+    if (released) this.#action(event, 'unsubscribe');
   }
 
   /**

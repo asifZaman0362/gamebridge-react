@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { Scene } from "../pixi/Scene";
 import { attachLogger, safeStringify, type LogRecord } from "@gamebridge-react/core";
 import { sceneEventsToEngine, sceneEventsToApp } from "../pixi/SceneEvents";
@@ -25,7 +25,10 @@ function formatPayload(payload: unknown): unknown {
 export default function DebugConsole() {
   const [records, setRecords] = useState<LogRecord[]>([]);
 
-  useEffect(() => {
+  // A layout effect so the logger is attached before sibling components run
+  // their own effects: their initial subscribe / replay / drain records are
+  // the ones that best show buffering at work.
+  useLayoutEffect(() => {
     const logger = {
       debug(record: object) {
         setRecords((current) => [...current.slice(-(MAX_RECORDS - 1)), record as LogRecord]);

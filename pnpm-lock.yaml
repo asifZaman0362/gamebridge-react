@@ -378,11 +378,10 @@ importers:
         version: 8.3.0(@types/node@24.13.5)(esbuild@0.27.7)
 
   packages/core:
-    dependencies:
+    devDependencies:
       tsup:
         specifier: ^8.5.1
         version: 8.5.1(postcss@8.5.28)(typescript@5.9.3)
-    devDependencies:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

@@ -64,6 +64,24 @@ describe('type: payloads', () => {
     });
   });
 
+  it('lets the payload be omitted for void events, on emit and on notifiers', () => {
+    bridge.emit('pause');
+    notifiers(toEngine).pause();
+    expectTypeOf(bridge.emit<'pause'>).parameters.toEqualTypeOf<[event: 'pause', payload?: void]>();
+  });
+
+  it('accepts an interface as an event map', () => {
+    interface Declared {
+      load: { url: string };
+      pause: void;
+    }
+    const declared = createBridge<Declared>();
+    declared.on('load', (payload) => {
+      expectTypeOf(payload).toEqualTypeOf<{ url: string }>();
+    });
+    expectTypeOf<EventKey<Declared>>().toEqualTypeOf<'load' | 'pause'>();
+  });
+
   it('returns a disposer from on and once', () => {
     expectTypeOf(bridge.on('pause', () => {})).toEqualTypeOf<Unsubscribe>();
     expectTypeOf(bridge.once('pause', () => {})).toEqualTypeOf<Unsubscribe>();
@@ -142,6 +160,11 @@ describe('type: logging', () => {
     const pair = createBridgePair<ToEngine, ToApp>();
     expectTypeOf(pair.enableLogging).parameter(0).toEqualTypeOf<Logger>();
     expectTypeOf(pair.disableLogging).toEqualTypeOf<() => void>();
+  });
+
+  it('exposes lifecycle teardown on a bridge and on a pair', () => {
+    expectTypeOf(bridge.dispose).toEqualTypeOf<() => void>();
+    expectTypeOf(createBridgePair<ToEngine, ToApp>().dispose).toEqualTypeOf<() => void>();
   });
 
   it('types listener counts as a number, not optional', () => {

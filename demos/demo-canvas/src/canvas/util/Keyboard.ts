@@ -1,5 +1,5 @@
 /**
- * Pixi has no built-in input layer (unlike Phaser's `scene.input.keyboard`),
+ * The mini-engine has no input layer (unlike Phaser's `scene.input.keyboard`),
  * so key bindings are just `KeyboardEvent.code` listeners on `window`,
  * scoped per-scene by calling `destroy()` from the scene's own teardown.
  */

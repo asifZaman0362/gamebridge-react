@@ -12,6 +12,42 @@ describe('createBridgePair', () => {
     expect(toEngine.transport).not.toBe(toApp.transport);
   });
 
+  it('disposes both directions', () => {
+    const pair = createBridgePair<ToEngine, ToApp>({
+      buffer: { toEngine: { load: 'queue' }, toApp: { ready: 'replay' } },
+    });
+    const onProgress = vi.fn();
+    pair.toApp.on('progress', onProgress);
+    pair.toEngine.emit('load', { url: 'a' });
+    pair.toApp.emit('ready');
+
+    pair.dispose();
+    pair.toApp.emit('progress', { done: 1 });
+
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(pair.toEngine.queuedCount('load')).toBe(0);
+    expect(pair.toApp.hasRetained('ready')).toBe(false);
+  });
+
+  it('namespaces both directions when given one shared transport', () => {
+    const transport = new GenericTransport();
+    const { toEngine, toApp } = createBridgePair<ToEngine, ToApp>({
+      toEngineTransport: transport,
+      toAppTransport: transport,
+    });
+    const onEngine = vi.fn();
+    const onApp = vi.fn();
+    toEngine.on('reset', onEngine);
+    toApp.on('reset', onApp);
+
+    toEngine.emit('reset');
+
+    expect(onEngine).toHaveBeenCalledOnce();
+    expect(onApp).not.toHaveBeenCalled();
+    expect(transport.listenerCount('toEngine:reset')).toBe(1);
+    expect(transport.listenerCount('toApp:reset')).toBe(1);
+  });
+
   it('does not let an event name shared by both maps cross directions', () => {
     const { toEngine, toApp } = createBridgePair<ToEngine, ToApp>();
     const onEngine = vi.fn();
@@ -133,6 +169,34 @@ describe('notifiers', () => {
     toEngine.on('load', handler);
 
     expect(handler).toHaveBeenCalledWith({ url: 'a' });
+  });
+
+  it('lets a void event be notified without an argument', () => {
+    const { toEngine } = createBridgePair<ToEngine, ToApp>();
+    const handler = vi.fn();
+    toEngine.on('reset', handler);
+
+    notifiers(toEngine).reset();
+
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('returns the same function for the same event', () => {
+    const notify = notifiers(createBridgePair<ToEngine, ToApp>().toEngine);
+
+    expect(notify.load).toBe(notify.load);
+  });
+
+  it('does not treat runtime probes like then or toJSON as events', async () => {
+    const { toEngine } = createBridgePair<ToEngine, ToApp>();
+    const emit = vi.spyOn(toEngine, 'emit');
+    const notify = notifiers(toEngine);
+
+    JSON.stringify(notify);
+    await Promise.resolve(notify);
+
+    expect(emit).not.toHaveBeenCalled();
+    expect((notify as unknown as { then?: unknown }).then).toBeUndefined();
   });
 });
 

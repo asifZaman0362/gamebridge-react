@@ -9,7 +9,7 @@ const INITIAL_STATS: PlayerStatsSnapshot = { health: 100, score: 0, steps: 0 };
 export default function Hud() {
   const [stats, setStats] = useState<PlayerStatsSnapshot>(INITIAL_STATS);
 
-  useBridgeEvent(playerStatsToApp, "statsChanged", setStats);
+  useBridgeEvent(playerStatsToApp, "statsChanged", setStats, { label: "Hud" });
 
   return (
     <div

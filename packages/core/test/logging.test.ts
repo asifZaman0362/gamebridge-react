@@ -270,7 +270,25 @@ describe('logging: verbose records', () => {
 
     bridge.on('command', vi.fn());
 
-    expect(records[0]).toMatchObject({ action: 'drain', count: 2 });
+    // The handler is registered before the backlog is drained, so the
+    // subscribe record comes first.
+    expect(records[0]).toMatchObject({ action: 'subscribe' });
+    expect(records[1]).toMatchObject({ action: 'drain', count: 2 });
+  });
+
+  it('does not report a second unsubscribe when a fired once disposer is called', () => {
+    const { logger, records } = makeLogger();
+    const bridge = makeBridge();
+    bridge.enableLogging(logger, { verbose: true });
+
+    const dispose = bridge.once('stream', vi.fn());
+    bridge.emit('stream', { tick: 1 });
+    dispose();
+
+    const unsubscribes = records.filter(
+      (record) => (record as { action?: string }).action === 'unsubscribe',
+    );
+    expect(unsubscribes).toHaveLength(1);
   });
 
   it('reports a replay when catching a late subscriber up', () => {
@@ -475,5 +493,28 @@ describe('safeStringify', () => {
     expect(output).toContain('[Function]');
     expect(output).toContain('10n');
     expect(output).toContain('Symbol(tag)');
+  });
+
+  it('serialises a shared, non-circular reference in full both times', () => {
+    const shared = { x: 1 };
+
+    expect(safeStringify({ a: shared, b: shared }, 0)).toBe('{"a":{"x":1},"b":{"x":1}}');
+  });
+
+  it('renders an Error as its name and message', () => {
+    expect(safeStringify({ reason: new Error('bad') }, 0)).toBe(
+      '{"reason":{"name":"Error","message":"bad"}}',
+    );
+  });
+
+  it('does not throw when a toJSON throws', () => {
+    const value = {
+      toJSON() {
+        throw new Error('nope');
+      },
+    };
+
+    expect(() => safeStringify(value)).not.toThrow();
+    expect(safeStringify(value)).toContain('nope');
   });
 });

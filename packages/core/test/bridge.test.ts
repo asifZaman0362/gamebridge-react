@@ -162,12 +162,49 @@ describe("Bridge: buffer mode 'queue'", () => {
 
   it('still retains while only an opted-out subscriber is attached', () => {
     const bridge = makeBridge();
-    // collectWaiting: false means this subscriber will not drain a backlog,
-    // but it does receive live emissions, so nothing needs retaining.
-    bridge.on('command', vi.fn(), { collectWaiting: false });
+    // An observer sees live emissions but does not consume them: the command
+    // must still reach the consumer that mounts later.
+    const observer = vi.fn();
+    bridge.on('command', observer, { collectWaiting: false });
 
     bridge.emit('command', { id: 1 });
 
+    expect(observer).toHaveBeenCalledWith({ id: 1 });
+    expect(bridge.queuedCount('command')).toBe(1);
+
+    const consumer = vi.fn();
+    bridge.on('command', consumer);
+    expect(consumer).toHaveBeenCalledWith({ id: 1 });
+  });
+
+  it('stops retaining once a consumer is attached alongside an observer', () => {
+    const bridge = makeBridge();
+    bridge.on('command', vi.fn(), { collectWaiting: false });
+    bridge.on('command', vi.fn());
+
+    bridge.emit('command', { id: 1 });
+
+    expect(bridge.queuedCount('command')).toBe(0);
+  });
+
+  it('retains nothing when maxQueued is 0', () => {
+    const bridge = makeBridge({ maxQueued: 0 });
+    bridge.emit('command', { id: 1 });
+
+    expect(bridge.queuedCount('command')).toBe(0);
+  });
+
+  it('delivers a command emitted from inside a draining handler', () => {
+    const bridge = makeBridge();
+    bridge.emit('command', { id: 1 });
+    const seen: number[] = [];
+
+    bridge.on('command', ({ id }) => {
+      seen.push(id);
+      if (id === 1) bridge.emit('command', { id: 99 });
+    });
+
+    expect(seen).toEqual([1, 99]);
     expect(bridge.queuedCount('command')).toBe(0);
   });
 
@@ -193,6 +230,20 @@ describe("Bridge: buffer mode 'queue'", () => {
 
     expect(handler).toHaveBeenCalledOnce();
     expect(handler).toHaveBeenCalledWith({ id: 1 });
+  });
+
+  it('leaves the rest of the backlog for the next subscriber after a once', () => {
+    const bridge = makeBridge();
+    bridge.emit('command', { id: 1 });
+    bridge.emit('command', { id: 2 });
+    bridge.emit('command', { id: 3 });
+    bridge.once('command', vi.fn());
+
+    expect(bridge.queuedCount('command')).toBe(2);
+
+    const next = vi.fn();
+    bridge.on('command', next);
+    expect(next.mock.calls.map(([payload]) => payload)).toEqual([{ id: 2 }, { id: 3 }]);
   });
 });
 
@@ -362,6 +413,20 @@ describe('Bridge: subscriptions', () => {
     expect(b).not.toHaveBeenCalled();
   });
 
+  it('leaves listeners the engine registered directly on a shared transport', () => {
+    const transport = new GenericTransport();
+    const engineInternal = vi.fn();
+    transport.on('stream', engineInternal);
+    const bridge = new Bridge<Events>({ transport });
+    bridge.on('stream', vi.fn());
+
+    bridge.off('stream');
+    transport.emit('stream', { tick: 1 });
+
+    expect(engineInternal).toHaveBeenCalledOnce();
+    expect(bridge.listenerCount('stream')).toBe(0);
+  });
+
   it('honours context as the this binding', () => {
     const bridge = makeBridge();
     const context = { name: 'owner' };
@@ -408,16 +473,52 @@ describe('Bridge: subscriptions', () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
-  it('accepts void events without a payload argument shape', () => {
+  it('accepts void events without a payload argument', () => {
     const bridge = makeBridge();
     const handler = vi.fn();
     bridge.on('bare', handler);
 
+    bridge.emit('bare');
     bridge.emit('bare', undefined);
 
-    expect(handler).toHaveBeenCalledOnce();
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a buffer entry inherited from Object.prototype', () => {
+    const bridge = new Bridge<{ constructor: void }>();
+    const handler = vi.fn();
+    bridge.emit('constructor');
+    bridge.on('constructor', handler);
+
+    expect(handler).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * An emitter with no error isolation, like `eventemitter3`: a throwing
+ * handler aborts the dispatch loop and the exception reaches the emitter.
+ */
+function makeUnisolatedTransport(): EventTransport {
+  const handlers = new Map<string, Array<(payload: unknown) => void>>();
+  return {
+    emit(event, payload) {
+      for (const fn of handlers.get(event) ?? []) fn(payload);
+    },
+    on(event, fn) {
+      const list = handlers.get(event) ?? [];
+      list.push(fn);
+      handlers.set(event, list);
+    },
+    off(event, fn) {
+      if (fn === undefined) handlers.delete(event);
+      else {
+        const list = handlers.get(event) ?? [];
+        const index = list.indexOf(fn);
+        if (index !== -1) list.splice(index, 1);
+      }
+    },
+  };
+}
 
 describe('Bridge: error isolation', () => {
   it('routes a throwing subscriber to onError and keeps siblings running', () => {
@@ -474,6 +575,80 @@ describe('Bridge: error isolation', () => {
 
     expect(() => dispose()).not.toThrow();
   });
+
+  it('isolates a throwing subscriber even on a transport that does not', () => {
+    const onError = vi.fn();
+    const bridge = new Bridge<Events>({ transport: makeUnisolatedTransport(), onError });
+    const after = vi.fn();
+    bridge.on('stream', () => {
+      throw new Error('boom');
+    });
+    bridge.on('stream', after);
+
+    expect(() => bridge.emit('stream', { tick: 1 })).not.toThrow();
+    expect(after).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(expect.any(Error), 'stream');
+  });
+
+  it('does not throw from emit when the transport itself throws', () => {
+    const onError = vi.fn();
+    const transport: EventTransport = {
+      emit: () => {
+        throw new Error('emitter destroyed');
+      },
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+    const bridge = new Bridge<Events>({ transport, onError });
+
+    expect(() => bridge.emit('stream', { tick: 1 })).not.toThrow();
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it('does not throw from on when the transport refuses the subscription', () => {
+    const onError = vi.fn();
+    const transport: EventTransport = {
+      emit: vi.fn(),
+      on: () => {
+        throw new Error('emitter destroyed');
+      },
+      off: vi.fn(),
+    };
+    const bridge = new Bridge<Events>({ transport, onError });
+
+    let dispose: (() => void) | undefined;
+    expect(() => {
+      dispose = bridge.on('stream', vi.fn());
+    }).not.toThrow();
+    expect(() => dispose?.()).not.toThrow();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(bridge.listenerCount('stream')).toBe(0);
+  });
+
+  it('does not throw when the onError hook itself throws', () => {
+    const bridge = makeBridge({
+      onError: () => {
+        throw new Error('reporter down');
+      },
+    });
+    bridge.on('stream', () => {
+      throw new Error('boom');
+    });
+
+    expect(() => bridge.emit('stream', { tick: 1 })).not.toThrow();
+  });
+
+  it('reports the event name without its namespace to onError', () => {
+    const onError = vi.fn();
+    const bridge = new Bridge<Events>({ namespace: 'engine', onError });
+    bridge.on('stream', () => {
+      throw new Error('boom');
+    });
+
+    bridge.emit('stream', { tick: 1 });
+
+    expect(onError).toHaveBeenCalledWith(expect.any(Error), 'stream');
+  });
 });
 
 describe('Bridge: buffer lifecycle', () => {
@@ -497,6 +672,55 @@ describe('Bridge: buffer lifecycle', () => {
 
     expect(bridge.queuedCount('command')).toBe(0);
     expect(bridge.hasRetained('state')).toBe(false);
+  });
+
+  it('dispose removes every subscription and every buffer', () => {
+    const bridge = makeBridge();
+    const handler = vi.fn();
+    bridge.on('stream', handler);
+    bridge.on('command', vi.fn());
+    bridge.emit('state', { value: 'ready' });
+    bridge.clear('command');
+    const disposeCommand = bridge.on('command', vi.fn());
+    disposeCommand();
+    bridge.emit('command', { id: 1 });
+
+    bridge.dispose();
+    bridge.emit('stream', { tick: 1 });
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(bridge.listenerCount('stream')).toBe(0);
+    expect(bridge.listenerCount('command')).toBe(0);
+    expect(bridge.queuedCount('command')).toBe(0);
+    expect(bridge.hasRetained('state')).toBe(false);
+  });
+
+  it('dispose leaves listeners the engine registered directly on a shared transport', () => {
+    const transport = new GenericTransport();
+    const engineInternal = vi.fn();
+    transport.on('stream', engineInternal);
+    const bridge = new Bridge<Events>({ transport });
+    bridge.on('stream', vi.fn());
+
+    bridge.dispose();
+    transport.emit('stream', { tick: 1 });
+
+    expect(engineInternal).toHaveBeenCalledOnce();
+    expect(transport.listenerCount('stream')).toBe(1);
+  });
+
+  it('remains usable after dispose', () => {
+    const bridge = makeBridge();
+    bridge.on('stream', vi.fn());
+    bridge.dispose();
+
+    const handler = vi.fn();
+    bridge.on('stream', handler);
+    bridge.emit('stream', { tick: 1 });
+    bridge.emit('command', { id: 1 });
+
+    expect(handler).toHaveBeenCalledOnce();
+    expect(bridge.queuedCount('command')).toBe(1);
   });
 
   it('prevents a cleared replay value reaching a later subscriber', () => {

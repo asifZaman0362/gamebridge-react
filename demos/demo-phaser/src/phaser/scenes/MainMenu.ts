@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { notifyApp } from "../SceneEvents";
 
 const TITLES = [
   "Byte Quest",
@@ -19,6 +20,10 @@ export default class MainMenu extends Phaser.Scene {
   }
 
   create() {
+    // Every scene that becomes current reports itself, so the `SceneCreated`
+    // replay slot never holds a scene that has already been stopped.
+    notifyApp.SceneCreated({ scene: this });
+
     const { width, height } = this.cameras.main;
 
     this.createDriftingGrid(width, height);

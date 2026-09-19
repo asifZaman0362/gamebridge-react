@@ -7,5 +7,6 @@
  */
 
 export { useBridgeEvent } from './useBridgeEvent';
+export type { UseBridgeEventOptions } from './useBridgeEvent';
 export { useBridgeEmit } from './useBridgeEmit';
 export type { BridgeEmit } from './useBridgeEmit';

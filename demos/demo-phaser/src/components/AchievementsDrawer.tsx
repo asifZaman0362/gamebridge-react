@@ -14,11 +14,17 @@ export default function AchievementsDrawer() {
     description: string;
   } | null>(null);
 
-  useBridgeEvent(achievementsToApp, "statusChanged", ({ entries }) =>
-    setView(entries),
+  useBridgeEvent(
+    achievementsToApp,
+    "statusChanged",
+    ({ entries }) => setView(entries),
+    { label: "AchievementsDrawer" },
   );
-  useBridgeEvent(achievementsToApp, "unlocked", ({ name, description }) =>
-    setToast({ name, description }),
+  useBridgeEvent(
+    achievementsToApp,
+    "unlocked",
+    ({ name, description }) => setToast({ name, description }),
+    { label: "AchievementsDrawer:toast" },
   );
 
   useEffect(() => {

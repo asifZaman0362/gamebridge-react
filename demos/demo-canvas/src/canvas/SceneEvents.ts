@@ -22,17 +22,32 @@ export type SceneEventsToEngine = {
   SetVolume: number;
 };
 
-const { toEngine, toApp } = createBridgePair<
+/**
+ * Both directions use the default `GenericTransport`. The engine here exposes
+ * no emitter the bridge would want to reuse, and the bridges are module-level
+ * singletons that outlive any one `Application` (React Strict Mode and HMR
+ * rebuild it), so a bridge-owned transport is the natural fit.
+ */
+export const sceneEvents = createBridgePair<
   SceneEventsToEngine,
   SceneEventsToApp
 >({
   buffer: {
-    // A load requested before the engine has booted still runs, exactly once.
-    toEngine: { LoadScene: "queue" },
-    // Whichever component mounts later still sees the current scene immediately.
+    toEngine: {
+      // A command: a load requested before the engine has booted still runs,
+      // exactly once. `app.init()` is async, so this window is real.
+      LoadScene: "queue",
+      // State: the latest value is what a freshly (re)built engine needs, so
+      // it is replayed to the engine's handler the moment it attaches.
+      SetPaused: "replay",
+      SetVolume: "replay",
+    },
+    // State: whichever component mounts later still sees the current scene.
     toApp: { SceneCreated: "replay" },
   },
 });
+
+const { toEngine, toApp } = sceneEvents;
 
 export const sceneEventsToEngine = toEngine;
 export const sceneEventsToApp = toApp;

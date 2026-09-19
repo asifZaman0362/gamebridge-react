@@ -1,5 +1,6 @@
 import { Container, Graphics, Text } from "../engine";
 import { Scene } from "../Scene";
+import { notifyApp } from "../SceneEvents";
 import { animate } from "../util/animate";
 import { pickRandom, randomBetween } from "../util/random";
 
@@ -21,6 +22,10 @@ export default class MainMenu extends Scene {
   private readonly disposers: (() => void)[] = [];
 
   create(): void {
+    // Every scene that becomes current reports itself, so the `SceneCreated`
+    // replay slot never holds a scene that has already been torn down.
+    notifyApp.SceneCreated({ scene: this });
+
     const { width, height } = this.app.screen;
 
     this.createDriftingGrid(width, height);

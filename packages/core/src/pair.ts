@@ -10,6 +10,7 @@ import {
   Bridge,
   type BridgeOptions,
   type BufferMode,
+  type EmitArgs,
   type EventKey,
   type EventMap,
   type ListenOptions,
@@ -121,8 +122,20 @@ export interface BridgePair<ToEngine extends EventMap, ToApp extends EventMap> {
   toEngine: Bridge<ToEngine>;
   /** Events travelling from the engine to the application layer. */
   toApp: Bridge<ToApp>;
-  /** Clear buffered payloads on both directions. */
+  /** Clear buffered payloads on both directions. See {@link Bridge.clear}. */
   clear(): void;
+
+  /**
+   * Remove every subscription and discard every buffered payload on both
+   * directions. See {@link Bridge.dispose}.
+   *
+   * ```ts
+   * // Vite: a hot reload of this module creates a fresh pair, so release
+   * // the old one rather than leave its handlers attached to nothing.
+   * if (import.meta.hot) import.meta.hot.dispose(() => pair.dispose());
+   * ```
+   */
+  dispose(): void;
 
   /**
    * Start logging both directions to one sink. Each record carries a `bus`
@@ -168,16 +181,27 @@ export interface BridgePair<ToEngine extends EventMap, ToApp extends EventMap> {
  * ```ts
  * createBridgePair<ToEngine, ToApp>({ toEngineTransport: engine.events });
  * ```
+ *
+ * If the *same* emitter is passed for both directions, each direction is
+ * given its own namespace automatically, so the collision described above
+ * still cannot happen.
  */
 export function createBridgePair<ToEngine extends EventMap, ToApp extends EventMap>(
   options: BridgePairOptions<ToEngine, ToApp> = {},
 ): BridgePair<ToEngine, ToApp> {
+  const toEngineName = options.names?.toEngine ?? 'toEngine';
+  const toAppName = options.names?.toApp ?? 'toApp';
+  const shared =
+    options.toEngineTransport !== undefined &&
+    options.toEngineTransport === options.toAppTransport;
+
   const toEngine = createBridge<ToEngine>({
     transport: options.toEngineTransport,
     buffer: options.buffer?.toEngine,
     maxQueued: options.maxQueued,
     onError: options.onError,
-    name: options.names?.toEngine ?? 'toEngine',
+    name: toEngineName,
+    namespace: shared ? toEngineName : undefined,
   });
 
   const toApp = createBridge<ToApp>({
@@ -185,7 +209,8 @@ export function createBridgePair<ToEngine extends EventMap, ToApp extends EventM
     buffer: options.buffer?.toApp,
     maxQueued: options.maxQueued,
     onError: options.onError,
-    name: options.names?.toApp ?? 'toApp',
+    name: toAppName,
+    namespace: shared ? toAppName : undefined,
   });
 
   return {
@@ -194,6 +219,10 @@ export function createBridgePair<ToEngine extends EventMap, ToApp extends EventM
     clear() {
       toEngine.clear();
       toApp.clear();
+    },
+    dispose() {
+      toEngine.dispose();
+      toApp.dispose();
     },
     enableLogging(logger, loggingOptions) {
       toEngine.enableLogging(logger, loggingOptions);
@@ -216,7 +245,7 @@ export function createBridgePair<ToEngine extends EventMap, ToApp extends EventM
  * @see {@link notifiers}
  */
 export type Notifiers<Events extends EventMap> = {
-  [K in EventKey<Events>]: (payload: Events[K]) => void;
+  [K in EventKey<Events>]: (...args: EmitArgs<Events, K>) => void;
 };
 
 /**
@@ -242,15 +271,16 @@ export type Listeners<Events extends EventMap> = {
  * name — it silently emits an event nobody listens to. Prefer
  * {@link Bridge.emit} in library code and reserve this for application code
  * where the ergonomics are worth it.
+ *
+ * Each per-event function is created once and reused, so `notify.load` is
+ * referentially stable and safe to pass as a prop or effect dependency.
  */
 export function notifiers<Events extends EventMap>(bridge: Bridge<Events>): Notifiers<Events> {
-  return new Proxy({} as Notifiers<Events>, {
-    get(_target, event: string) {
-      return (payload: unknown) => {
-        bridge.emit(event as EventKey<Events>, payload as never);
-      };
-    },
-  });
+  return proxyPerEvent<Notifiers<Events>>(
+    (event) =>
+      (...args: unknown[]) =>
+        bridge.emit(event as EventKey<Events>, ...(args as EmitArgs<Events, EventKey<Events>>)),
+  );
 }
 
 /**
@@ -260,10 +290,30 @@ export function notifiers<Events extends EventMap>(bridge: Bridge<Events>): Noti
  * Carries the same trade-offs as {@link notifiers}.
  */
 export function listeners<Events extends EventMap>(bridge: Bridge<Events>): Listeners<Events> {
-  return new Proxy({} as Listeners<Events>, {
-    get(_target, event: string) {
-      return (handler: (payload: unknown) => void, options?: ListenOptions) =>
-        bridge.on(event as EventKey<Events>, handler as never, options);
+  return proxyPerEvent<Listeners<Events>>(
+    (event) => (handler: (payload: unknown) => void, options?: ListenOptions) =>
+      bridge.on(event as EventKey<Events>, handler as never, options),
+  );
+}
+
+/**
+ * Property names the runtime probes on arbitrary objects. Treating them as
+ * events would make `JSON.stringify(notify)` emit a `toJSON` event, and
+ * `await notify` emit `then` and never settle.
+ */
+const RESERVED = new Set(['then', 'toJSON', 'constructor']);
+
+function proxyPerEvent<T extends object>(build: (event: string) => Function): T {
+  const cache = new Map<string, Function>();
+  return new Proxy({} as T, {
+    get(_target, property) {
+      if (typeof property !== 'string' || RESERVED.has(property)) return undefined;
+      let fn = cache.get(property);
+      if (fn === undefined) {
+        fn = build(property);
+        cache.set(property, fn);
+      }
+      return fn;
     },
   });
 }

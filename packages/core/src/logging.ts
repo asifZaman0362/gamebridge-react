@@ -118,25 +118,44 @@ export interface LoggingOptions {
  * them would turn a diagnostic aid into a crash.
  *
  * Circular references become `"[Circular]"`, functions become `"[Function]"`,
- * and `BigInt` and `Symbol` become strings.
+ * `Error`s become `{ name, message }`, and `BigInt` and `Symbol` become
+ * strings. An object referenced twice without a cycle — a config shared by
+ * two entities, say — is serialised in full both times.
+ *
+ * If the value still cannot be serialised (a `toJSON` or getter that throws),
+ * the failure itself is returned as a string rather than propagated.
  */
 export function safeStringify(value: unknown, indent = 2): string {
-  const seen = new WeakSet<object>();
+  // The chain of objects enclosing the value currently being serialised. Only
+  // a reference back into this chain is a cycle; a reference to something
+  // already serialised elsewhere is merely shared.
+  const ancestors: object[] = [];
 
-  return JSON.stringify(
-    value,
-    (_key, current: unknown) => {
-      if (typeof current === 'bigint') return `${current.toString()}n`;
-      if (typeof current === 'symbol') return current.toString();
-      if (typeof current === 'function') return '[Function]';
-      if (typeof current === 'object' && current !== null) {
-        if (seen.has(current)) return '[Circular]';
-        seen.add(current);
-      }
-      return current;
-    },
-    indent,
-  );
+  try {
+    return JSON.stringify(
+      value,
+      function (this: unknown, _key, current: unknown) {
+        if (typeof current === 'bigint') return `${current.toString()}n`;
+        if (typeof current === 'symbol') return current.toString();
+        if (typeof current === 'function') return '[Function]';
+        if (typeof current === 'object' && current !== null) {
+          // `this` is the object holding `current`; unwind to it.
+          while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) {
+            ancestors.pop();
+          }
+          if (ancestors.includes(current)) return '[Circular]';
+          ancestors.push(current);
+          if (current instanceof Error) {
+            return { name: current.name, message: current.message };
+          }
+        }
+        return current;
+      },
+      indent,
+    );
+  } catch (error) {
+    return `"[Unserialisable: ${error instanceof Error ? error.message : String(error)}]"`;
+  }
 }
 
 interface ConsoleLike {

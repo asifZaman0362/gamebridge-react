@@ -104,9 +104,10 @@ interface Registration {
  *
  * - handlers fire synchronously, in registration order;
  * - `context` is honoured as the `this` binding;
- * - the handler list is snapshotted before dispatch, so a handler may
- *   subscribe or unsubscribe during its own dispatch without affecting the
- *   set of handlers that receive the current event;
+ * - the handler list is copy-on-write: `on` and `off` replace it rather than
+ *   mutate it, so a handler may subscribe or unsubscribe during its own
+ *   dispatch without affecting the set of handlers that receive the current
+ *   event — and `emit`, which sits on the per-frame path, allocates nothing;
  * - a handler that throws is isolated: the error is routed to `onError` and
  *   the remaining handlers still run.
  *
@@ -117,7 +118,12 @@ interface Registration {
  * default.
  */
 export class GenericTransport implements CountableTransport {
-  readonly #handlers = new Map<string, Registration[]>();
+  /**
+   * Registration lists are treated as immutable once stored: `on` and `off`
+   * install a fresh array, never edit one in place. `emit` can therefore
+   * iterate the array it read without copying it first.
+   */
+  readonly #handlers = new Map<string, readonly Registration[]>();
   readonly #onError: (error: unknown, event: string) => void;
 
   /**
@@ -131,15 +137,21 @@ export class GenericTransport implements CountableTransport {
 
   emit(event: string, payload?: unknown): void {
     const registrations = this.#handlers.get(event);
-    if (registrations === undefined || registrations.length === 0) return;
+    if (registrations === undefined) return;
 
-    // Snapshot: a handler is allowed to add or remove listeners mid-dispatch.
-    for (const { fn, context } of registrations.slice()) {
+    // No snapshot needed: a handler that adds or removes listeners
+    // mid-dispatch causes a new array to be installed, not this one edited.
+    for (const { fn, context } of registrations) {
       try {
         if (context === undefined) fn(payload);
         else fn.call(context, payload);
       } catch (error) {
-        this.#onError(error, event);
+        // A broken reporter must not turn a contained failure into a thrown one.
+        try {
+          this.#onError(error, event);
+        } catch {
+          // Nowhere left to report to.
+        }
       }
     }
   }
@@ -147,8 +159,10 @@ export class GenericTransport implements CountableTransport {
   on(event: string, fn: TransportHandler, context?: unknown): void {
     const registrations = this.#handlers.get(event);
     const registration: Registration = context === undefined ? { fn } : { fn, context };
-    if (registrations === undefined) this.#handlers.set(event, [registration]);
-    else registrations.push(registration);
+    this.#handlers.set(
+      event,
+      registrations === undefined ? [registration] : [...registrations, registration],
+    );
   }
 
   off(event: string, fn?: TransportHandler, context?: unknown): void {
@@ -166,8 +180,9 @@ export class GenericTransport implements CountableTransport {
       (registration) =>
         registration.fn === fn && (context === undefined || registration.context === context),
     );
-    if (index !== -1) registrations.splice(index, 1);
-    if (registrations.length === 0) this.#handlers.delete(event);
+    if (index === -1) return;
+    if (registrations.length === 1) this.#handlers.delete(event);
+    else this.#handlers.set(event, registrations.filter((_, i) => i !== index));
   }
 
   listenerCount(event: string): number {

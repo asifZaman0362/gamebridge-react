@@ -1,6 +1,8 @@
-import { forwardRef, useEffect, useLayoutEffect, useRef } from "react";
+import { forwardRef, useLayoutEffect, useRef } from "react";
+import { useBridgeEvent } from "@gamebridge-react/react";
 import StartGame from "../phaser/main";
 import { sceneEventsToApp } from "../phaser/SceneEvents";
+import { playerStatsToApp } from "../phaser/PlayerStatsBridge";
 import Phaser from "phaser";
 
 export interface IRefPhaserGame {
@@ -36,26 +38,33 @@ export const PhaserGame = forwardRef<IRefPhaserGame, IProps>(
           detachEngineControls.current = null;
           game.current.destroy(true);
           game.current = null;
+          // The engine that produced these replay values is gone: a component
+          // mounting before the next engine reports must not be handed a dead
+          // scene or a dead player's stats. The `toEngine` side is left alone —
+          // it holds UI-owned state (paused, volume) and queued commands that
+          // the next engine should still pick up.
+          sceneEventsToApp.clear();
+          playerStatsToApp.clear();
         }
       };
     }, [ref]);
 
-    useEffect(() => {
-      sceneEventsToApp.on("SceneCreated", ({ scene }) => {
-        if (currentActiveScene && typeof currentActiveScene === "function") {
-          currentActiveScene(scene);
-        }
-
+    // Subscribed for exactly this component's lifetime, disposed on unmount,
+    // and always invoking the latest closure — so `ref` and
+    // `currentActiveScene` need no dependency bookkeeping.
+    useBridgeEvent(
+      sceneEventsToApp,
+      "SceneCreated",
+      ({ scene }) => {
+        currentActiveScene?.(scene);
         if (typeof ref === "function") {
           ref({ game: game.current, scene });
         } else if (ref) {
           ref.current = { game: game.current, scene };
         }
-      });
-      return () => {
-        sceneEventsToApp.off("SceneCreated");
-      };
-    }, [currentActiveScene, ref]);
+      },
+      { label: "PhaserGame" },
+    );
 
     return <div id="game-container"></div>;
   },

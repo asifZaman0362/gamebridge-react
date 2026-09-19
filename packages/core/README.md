@@ -42,11 +42,14 @@ export const { toEngine, toApp } = createBridgePair<ToEngine, ToApp>({
 });
 ```
 
-Emit from either side:
+Emit from either side. The payload argument is omitted for `void` events:
 
 ```ts
 toEngine.emit('load', { url: '/scene.json' });
+toEngine.emit('pause');
 ```
+
+Event maps may be declared with `type` or `interface`.
 
 Subscribe, and dispose when the subscriber goes away:
 
@@ -56,6 +59,27 @@ const dispose = toApp.on('progress', ({ done, total }) => {
 });
 
 dispose();
+```
+
+### Tearing down
+
+Two operations cover the lifecycle of the engine side:
+
+```ts
+// The engine was destroyed and will be rebuilt: buffered state it produced
+// (a retained `ready`, a queued command for the old instance) is stale, but
+// the subscribers are still valid.
+toApp.clear();
+
+// This module is going away entirely — a hot reload, a route change out of
+// the game: drop every subscription and every buffer on both directions.
+pair.dispose();
+```
+
+`dispose()` removes only what the bridge registered, so listeners the engine holds on a shared transport are untouched, and the bridge stays usable afterwards. With Vite, the natural place for it is the module's own HMR hook:
+
+```ts
+if (import.meta.hot) import.meta.hot.dispose(() => pair.dispose());
 ```
 
 ## Buffering modes
@@ -129,7 +153,7 @@ toEngine.emit('ready', undefined);
 //              ~~~~~  not assignable to keyof ToEngine
 ```
 
-If two bridges must share one transport, give each a `namespace` instead.
+If two bridges must share one transport, give each a `namespace` instead. `createBridgePair` does this automatically when the same transport is passed for both directions.
 
 ## Logging
 
@@ -210,9 +234,10 @@ A logger is never allowed to break the application: a throwing sink is swallowed
 
 ## Fault tolerance
 
-- **Handler isolation.** A subscriber that throws does not prevent other subscribers from running. Errors are routed to `onError`, which defaults to logging.
-- **Safe teardown.** Disposers never throw, including when the underlying transport has already been destroyed — a UI framework may unmount a subtree while the engine is mid-teardown.
-- **Stable dispatch.** The handler list is snapshotted before dispatch, so subscribing or unsubscribing from inside a handler does not disturb the current dispatch.
+- **Handler isolation.** A subscriber that throws does not prevent other subscribers from running, whatever transport is in use — every handler is registered through an isolating wrapper, so an engine emitter with no isolation of its own (such as `eventemitter3`) is still safe. Errors are routed to `onError`, which defaults to logging; a throwing `onError` is swallowed.
+- **Nothing throws.** `emit`, `on`, `off` and disposers never throw, including when the underlying transport has already been destroyed — a UI framework may unmount a subtree while the engine is mid-teardown. Transport failures are reported to `onError`, and a subscription the transport refused yields a no-op disposer.
+- **Stable dispatch.** `GenericTransport` snapshots the handler list before dispatch, so subscribing or unsubscribing from inside a handler does not disturb the current dispatch. Engine emitters built on `eventemitter3` behave the same way.
+- **Shared transports stay intact.** `off(event)` removes only what the bridge registered, never listeners the engine holds on the same emitter.
 - **Bounded buffers.** `queue` events retain at most `maxQueued` payloads (default 256), so a subscriber that never attaches cannot grow memory without limit.
 - **No double-running commands.** A `queue` emission that was delivered live is not retained, so a subscriber attaching later does not re-run work another subscriber already did.
 
@@ -228,7 +253,9 @@ A logger is never allowed to break the application: a throwing sink is swallowed
 | `bridge.on(event, handler, options?)` | Subscribe; returns a disposer. |
 | `bridge.once(event, handler, options?)` | Subscribe for a single occurrence. |
 | `bridge.off(event, handler?)` | Remove a subscription, or all for an event. |
-| `bridge.clear(event?)` | Discard buffered payloads. Call on engine teardown. |
+| `bridge.clear(event?)` | Discard buffered payloads. Call when the engine is rebuilt. |
+| `bridge.dispose()` | Remove every subscription and discard every buffer. Call when the module is unloaded. |
+| `pair.clear()` / `pair.dispose()` | The same, for both directions of a pair. |
 | `bridge.queuedCount(event)` | Retained `queue` payloads. Diagnostics. |
 | `bridge.hasRetained(event)` | Whether a `replay` payload is held. Diagnostics. |
 | `bridge.listenerCount(event)` | Subscriptions this bridge holds for an event. |
@@ -247,7 +274,7 @@ A logger is never allowed to break the application: a throwing sink is swallowed
 | `context` | — | `this` binding for the handler. |
 | `once` | `false` | Remove the subscription after one invocation. |
 | `label` | function name | Name for this handler in log records. |
-| `collectWaiting` | `true` | Whether to receive a `queue` event's backlog. Set `false` for a subscriber that must not consume a backlog another subscriber is waiting for. |
+| `collectWaiting` | `true` | Whether this subscriber consumes a `queue` event. Set `false` for an observer that sees live emissions but must not consume a backlog another subscriber is waiting for; while only observers are attached, emissions are still retained. |
 
 ## License
 

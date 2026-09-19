@@ -29,6 +29,7 @@ export { Bridge } from './bridge';
 export type {
   BridgeOptions,
   BufferMode,
+  EmitArgs,
   EventKey,
   EventMap,
   Handler,

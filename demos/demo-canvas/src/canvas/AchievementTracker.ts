@@ -24,7 +24,7 @@ export type AchievementEventsToApp = {
 };
 
 /**
- * Phaser-side owner of achievement state: the criteria table and the
+ * Engine-side owner of achievement state: the criteria table and the
  * decision of when something unlocks. It does not track stats itself — the
  * game reports changes via {@link onStatUpdate} — and nothing on the app
  * side can trigger an unlock; it only hears about the result, via
@@ -38,7 +38,7 @@ const achievements = createBridge<AchievementEventsToApp>({
 /**
  * The app side's only handle onto achievement state. Only ever call `.on()`
  * / `.once()` on this from the app — it is conceptually read-only, the same
- * way `globalToApp` in {@link "./GlobalBridge"} is.
+ * way `playerStatsToApp` in {@link "./PlayerStatsBridge"} is.
  */
 export const achievementsToApp = achievements;
 
