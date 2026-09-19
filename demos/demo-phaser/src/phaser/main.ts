@@ -2,6 +2,7 @@ import { AUTO, Game } from "phaser";
 import Boot from "./scenes/Boot";
 import MainMenu from "./scenes/MainMenu";
 import LevelLava from "./scenes/LevelLava";
+import LevelWater from "./scenes/LevelWater";
 import { LevelBase } from "./LevelBase";
 import { sceneEventsToEngine } from "./SceneEvents";
 
@@ -16,7 +17,7 @@ const config: Phaser.Types.Core.GameConfig = {
   height: GAME_HEIGHT,
   parent: "game-container",
   backgroundColor: "#028af8",
-  scene: [Boot, MainMenu, LevelLava],
+  scene: [Boot, MainMenu, LevelLava, LevelWater],
 };
 
 /**

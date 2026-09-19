@@ -13,12 +13,17 @@ export type EnemyOptions = {
   cellToWorld: (pos: GridPosition) => { x: number; y: number };
   radius: number;
   tickMs: number;
+  /** Number of hits this enemy can take before dying. Defaults to 1. */
+  health?: number;
+  /** Sprite color. Defaults to red. */
+  color?: number;
 };
 
-/** A small red dot that wanders the grid, picking a random direction each tick and staying put if that direction is blocked. */
+/** A dot that wanders the grid, picking a random direction each tick and staying put if that direction is blocked. */
 export class Enemy {
   position: GridPosition;
   isDestroyed = false;
+  health: number;
 
   private readonly sprite: Phaser.GameObjects.Arc;
   private readonly isWalkable: (pos: GridPosition) => boolean;
@@ -27,11 +32,12 @@ export class Enemy {
 
   constructor(scene: Phaser.Scene, spawn: GridPosition, options: EnemyOptions) {
     this.position = { ...spawn };
+    this.health = options.health ?? 1;
     this.isWalkable = options.isWalkable;
     this.cellToWorld = options.cellToWorld;
 
     const { x, y } = this.cellToWorld(spawn);
-    this.sprite = scene.add.circle(x, y, options.radius, 0xff0000);
+    this.sprite = scene.add.circle(x, y, options.radius, options.color ?? 0xff0000);
 
     this.timer = scene.time.addEvent({
       delay: options.tickMs,
@@ -42,6 +48,12 @@ export class Enemy {
 
   get worldPosition(): { x: number; y: number } {
     return { x: this.sprite.x, y: this.sprite.y };
+  }
+
+  /** Applies `amount` damage. Returns whether the enemy died from this hit. */
+  takeDamage(amount: number): boolean {
+    this.health -= amount;
+    return this.health <= 0;
   }
 
   private tick(): void {

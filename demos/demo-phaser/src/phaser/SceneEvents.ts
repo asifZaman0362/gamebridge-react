@@ -4,7 +4,7 @@ import { createBridgePair, notifiers } from "@gamebridge-react/core";
 export const MAIN_MENU_SCENE = "MainMenu";
 
 /** Level scenes selectable from the Control Panel's level dropdown. */
-export const LEVEL_SCENES = ["LevelLava"] as const;
+export const LEVEL_SCENES = ["LevelLava", "LevelWater"] as const;
 export type LevelSceneKey = (typeof LEVEL_SCENES)[number];
 
 export type SceneEventsToApp = {
