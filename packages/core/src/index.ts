@@ -2,15 +2,14 @@
  * @packageDocumentation
  *
  * A typed, fault-tolerant event bridge between a declarative UI layer and an
- * imperatively managed engine — a renderer, game loop, or canvas.
+ * imperative engine — a renderer, game loop, or canvas.
  *
- * The problem it solves: the two sides mount independently, so either may emit
- * before the other is listening. Events are therefore buffered per event name
- * according to declared semantics — see {@link BufferMode} — rather than
- * dropped or replayed uniformly.
+ * The two sides mount independently, so either may emit before the other is
+ * listening. Each event declares how that case is handled — see
+ * {@link BufferMode} — instead of every event being dropped or replayed alike.
  *
- * The transport is pluggable. An engine that already owns an emitter can be
- * used as the backend directly; one that does not uses {@link GenericTransport}.
+ * The transport is pluggable: an engine that already owns an emitter can be
+ * used directly; one that does not uses {@link GenericTransport}.
  *
  * @example
  * ```ts

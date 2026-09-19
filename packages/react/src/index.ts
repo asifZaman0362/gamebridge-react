@@ -1,9 +1,9 @@
 /**
  * @packageDocumentation
  *
- * React bindings for `@gamebridge-react/core`: hooks for subscribing to and
- * emitting bridge events from a component, using the disposer returned by
- * {@link Bridge.on} as the `useEffect` cleanup.
+ * React bindings for `@gamebridge-react/core`: hooks that subscribe to and
+ * emit bridge events from a component, using the disposer from `bridge.on`
+ * as the effect cleanup.
  */
 
 export { useBridgeEvent } from './useBridgeEvent';

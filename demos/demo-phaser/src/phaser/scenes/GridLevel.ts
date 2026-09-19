@@ -56,6 +56,8 @@ export abstract class GridLevel extends LevelBase {
   }
 
   create(): void {
+    // Reported first, so the `SceneCreated` replay slot points at this scene
+    // as soon as it exists.
     notifyApp.SceneCreated({ scene: this });
     this.buildGrid();
     this.spawnPlayer();

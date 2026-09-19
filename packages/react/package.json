@@ -1,7 +1,22 @@
 {
   "name": "@gamebridge-react/react",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "React hooks for @gamebridge-react/core: subscribe to and emit bridge events from a component.",
+  "keywords": ["event-bridge", "react", "hooks", "phaser", "pixi", "events", "game", "canvas"],
+  "homepage": "https://github.com/asifZaman0362/gamebridge-react/tree/main/packages/react#readme",
+  "bugs": "https://github.com/asifZaman0362/gamebridge-react/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asifZaman0362/gamebridge-react.git",
+    "directory": "packages/react"
+  },
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -33,6 +48,6 @@
   "peerDependencies": {
     "react": ">=18"
   },
-  "author": "Asif Zaman <asifzaman0362@gmail.com>",
+  "author": "Asif Zaman <zero362001@gmail.com>",
   "license": "MIT"
 }

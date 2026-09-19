@@ -17,6 +17,7 @@ export type PlayerStatsEventsToApp = {
  */
 const playerStats = createBridge<PlayerStatsEventsToApp>({
   name: "playerStats",
+  // State, not a command: a HUD mounting mid-level needs the current values.
   buffer: { statsChanged: "replay" },
 });
 

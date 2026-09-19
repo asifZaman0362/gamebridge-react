@@ -166,6 +166,8 @@ pair.enableLogging(consoleLogger);
 pair.disableLogging();
 ```
 
+`consoleLogger` writes via `console.debug`, which browser devtools hide at the default log level — enable "Verbose" (Chrome) or "Debug" (Firefox) to see it.
+
 One record per emission, carrying the bus, event, payload, and what became of it:
 
 ```json
@@ -236,7 +238,7 @@ A logger is never allowed to break the application: a throwing sink is swallowed
 
 - **Handler isolation.** A subscriber that throws does not prevent other subscribers from running, whatever transport is in use — every handler is registered through an isolating wrapper, so an engine emitter with no isolation of its own (such as `eventemitter3`) is still safe. Errors are routed to `onError`, which defaults to logging; a throwing `onError` is swallowed.
 - **Nothing throws.** `emit`, `on`, `off` and disposers never throw, including when the underlying transport has already been destroyed — a UI framework may unmount a subtree while the engine is mid-teardown. Transport failures are reported to `onError`, and a subscription the transport refused yields a no-op disposer.
-- **Stable dispatch.** `GenericTransport` snapshots the handler list before dispatch, so subscribing or unsubscribing from inside a handler does not disturb the current dispatch. Engine emitters built on `eventemitter3` behave the same way.
+- **Stable dispatch.** `GenericTransport` keeps its handler list copy-on-write, so subscribing or unsubscribing from inside a handler does not disturb the current dispatch. Engine emitters built on `eventemitter3` behave the same way.
 - **Shared transports stay intact.** `off(event)` removes only what the bridge registered, never listeners the engine holds on the same emitter.
 - **Bounded buffers.** `queue` events retain at most `maxQueued` payloads (default 256), so a subscriber that never attaches cannot grow memory without limit.
 - **No double-running commands.** A `queue` emission that was delivered live is not retained, so a subscriber attaching later does not re-run work another subscriber already did.
@@ -265,7 +267,7 @@ A logger is never allowed to break the application: a throwing sink is swallowed
 | `bridge.disableLogging()` | Stop diagnostic logging. |
 | `consoleLogger` | Pretty-printing logger, circular-safe. |
 | `GenericTransport` | Default backend for engines with no emitter. |
-| `notifiers(bridge)` / `listeners(bridge)` | Optional per-event call-site sugar. |
+| `notifiers(bridge)` / `listeners(bridge)` | Optional per-event call-site sugar: `notify.load({ url })`. Proxy-based, so not tree-shakeable, and `then` / `toJSON` / `constructor` cannot be event names through it. |
 
 ### Listen options
 

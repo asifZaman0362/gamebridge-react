@@ -11,6 +11,10 @@ export default function ControlPanel() {
   const [volume, setVolume] = useState(1);
   const [level, setLevel] = useState<LevelSceneKey>(LEVEL_SCENES[0]);
 
+  // `notifyEngine` is `notifiers(sceneEvents.toEngine)`: `notifyEngine.SetPaused(x)`
+  // is `toEngine.emit("SetPaused", x)`. Nothing here checks whether the engine
+  // is up. `LoadScene` is queued until its handler attaches, and `SetPaused` /
+  // `SetVolume` are replayed to it, so a fresh engine always gets current values.
   const togglePaused = () => {
     const next = !paused;
     setPaused(next);
@@ -19,6 +23,8 @@ export default function ControlPanel() {
 
   const goToMainMenu = () => {
     setPaused(false);
+    // `UnloadScene` is `'none'`: with no engine there is nothing to unload, so
+    // dropping it is correct. The `LoadScene` after it is what gets queued.
     notifyEngine.UnloadScene();
     notifyEngine.LoadScene({ key: MAIN_MENU_SCENE });
   };

@@ -1,9 +1,8 @@
 /**
  * @module pair
  *
- * Bridge construction. A {@link Bridge} carries events in one direction;
- * {@link createBridge} makes one, and {@link createBridgePair} makes the
- * matched two most applications start with.
+ * Factories: {@link createBridge} for one channel, {@link createBridgePair}
+ * for the usual two-way setup, plus optional per-event call-site sugar.
  */
 
 import {
@@ -20,25 +19,18 @@ import type { Logger, LoggingOptions } from './logging';
 import type { EventTransport } from './transport';
 
 /**
- * Create a single bridge.
+ * Create a single bridge; the same as `new Bridge(options)`.
  *
- * Equivalent to `new Bridge(options)`, and the right starting point whenever
- * the two-bridge shape of {@link createBridgePair} does not fit — several
- * channels in the same direction, an extra bridge for a subsystem with its own
- * event vocabulary, or one bridge shared by two engines.
- *
- * Give each bridge a `name`: it is what distinguishes them in log records once
- * more than one exists.
+ * Use it when a pair does not fit: several channels in the same direction, or
+ * a subsystem with its own event map. Give each a `name`, or log records
+ * cannot tell them apart.
  *
  * @example
  * ```ts
- * // One channel per concern, rather than one pair carrying everything.
  * const sceneCommands = createBridge<SceneEvents>({
  *   name: 'scene',
  *   buffer: { load: 'queue' },
  * });
- *
- * const audioCommands = createBridge<AudioEvents>({ name: 'audio' });
  *
  * const engineReports = createBridge<ReportEvents>({
  *   name: 'reports',
@@ -53,8 +45,8 @@ export function createBridge<Events extends EventMap>(
 }
 
 /**
- * The subset of {@link Bridge} that {@link attachLogger} needs, so bridges
- * with different event maps can be logged together.
+ * What {@link attachLogger} needs from a bridge, so bridges with different
+ * event maps can share a logger.
  */
 export interface LoggableBridge {
   enableLogging(logger: Logger, options?: LoggingOptions): void;
@@ -62,18 +54,14 @@ export interface LoggableBridge {
 }
 
 /**
- * Point several bridges at one logger.
- *
- * Each record carries the `bus` field naming its bridge, so a single sink
- * shows the whole conversation across every channel in the order it happened.
+ * Enable one logger on several bridges. Each record's `bus` field names the
+ * bridge it came from.
  *
  * @returns A function that disables logging on all of them.
  *
  * @example
  * ```ts
- * const stop = attachLogger([sceneCommands, audioCommands, engineReports],
- *   consoleLogger, { verbose: true });
- *
+ * const stop = attachLogger([sceneCommands, engineReports], consoleLogger, { verbose: true });
  * stop();
  * ```
  */
@@ -88,7 +76,7 @@ export function attachLogger(
   };
 }
 
-/** Configuration for {@link createBridgePair}. */
+/** Options for {@link createBridgePair}. */
 export interface BridgePairOptions<ToEngine extends EventMap, ToApp extends EventMap> {
   /** Backend for the app-to-engine direction. Defaults to a fresh generic transport. */
   toEngineTransport?: EventTransport;
@@ -102,46 +90,40 @@ export interface BridgePairOptions<ToEngine extends EventMap, ToApp extends Even
     toApp?: Partial<Record<EventKey<ToApp>, BufferMode>>;
   };
 
-  /** Maximum retained payloads per `'queue'` event, applied to both directions. */
+  /** Cap on retained payloads per `'queue'` event, for both directions. */
   maxQueued?: number;
 
-  /** Error reporting hook, applied to both directions. */
+  /** Error hook, for both directions. */
   onError?: (error: unknown, event: string) => void;
 
   /**
-   * Labels used to identify each direction in log records.
+   * Names shown in log records.
    *
    * @defaultValue `{ toEngine: 'toEngine', toApp: 'toApp' }`
    */
   names?: { toEngine?: string; toApp?: string };
 }
 
-/** The two directional bridges returned by {@link createBridgePair}. */
+/** The two bridges returned by {@link createBridgePair}. */
 export interface BridgePair<ToEngine extends EventMap, ToApp extends EventMap> {
-  /** Events travelling from the application layer to the engine. */
+  /** Events from the application layer to the engine. */
   toEngine: Bridge<ToEngine>;
-  /** Events travelling from the engine to the application layer. */
+  /** Events from the engine to the application layer. */
   toApp: Bridge<ToApp>;
-  /** Clear buffered payloads on both directions. See {@link Bridge.clear}. */
+  /** {@link Bridge.clear} on both directions. */
   clear(): void;
 
   /**
-   * Remove every subscription and discard every buffered payload on both
-   * directions. See {@link Bridge.dispose}.
+   * {@link Bridge.dispose} on both directions.
    *
    * ```ts
-   * // Vite: a hot reload of this module creates a fresh pair, so release
-   * // the old one rather than leave its handlers attached to nothing.
+   * // Vite: a hot reload creates a fresh pair, so release the old one.
    * if (import.meta.hot) import.meta.hot.dispose(() => pair.dispose());
    * ```
    */
   dispose(): void;
 
-  /**
-   * Start logging both directions to one sink. Each record carries a `bus`
-   * field naming the direction it came from, so a single logger can follow
-   * the whole conversation in order.
-   */
+  /** Log both directions to one sink; records carry a `bus` field naming the direction. */
   enableLogging(logger: Logger, options?: LoggingOptions): void;
 
   /** Stop logging both directions. */
@@ -149,18 +131,11 @@ export interface BridgePair<ToEngine extends EventMap, ToApp extends EventMap> {
 }
 
 /**
- * Create a matched pair of bridges, one per direction.
+ * Create one bridge per direction, each with its own transport.
  *
- * Each direction gets **its own transport by default**, which is the point of
- * this helper. Sharing a single emitter between both directions means an event
- * name appearing in both maps — something generic like `reset` or `pause` — can
- * trigger the wrong side's handler: the application emits `reset` towards the
- * engine, and the application's own `reset` subscriber fires. Keeping the
- * transports separate makes that impossible structurally, rather than relying
- * on the two event maps never sharing a name.
- *
- * Separate maps also give direction-correct typing: an event declared only in
- * `ToApp` cannot be emitted on the `toEngine` bridge, and vice versa.
+ * Separate transports mean an event name that appears in both maps (`reset`,
+ * `pause`) cannot fire the wrong side's handler. Separate maps mean an event
+ * declared only in `ToApp` cannot be emitted on `toEngine`.
  *
  * @example
  * ```ts
@@ -175,16 +150,13 @@ export interface BridgePair<ToEngine extends EventMap, ToApp extends EventMap> {
  * });
  * ```
  *
- * To reuse an emitter the engine already owns, pass it as the transport for
- * that direction:
+ * To reuse an emitter the engine already owns, pass it as that direction's
+ * transport. If the *same* emitter is passed for both directions, each gets
+ * its own namespace automatically.
  *
  * ```ts
  * createBridgePair<ToEngine, ToApp>({ toEngineTransport: engine.events });
  * ```
- *
- * If the *same* emitter is passed for both directions, each direction is
- * given its own namespace automatically, so the collision described above
- * still cannot happen.
  */
 export function createBridgePair<ToEngine extends EventMap, ToApp extends EventMap>(
   options: BridgePairOptions<ToEngine, ToApp> = {},
@@ -239,20 +211,12 @@ export function createBridgePair<ToEngine extends EventMap, ToApp extends EventM
 /* Optional call-site ergonomics                                      */
 /* ------------------------------------------------------------------ */
 
-/**
- * An object exposing one emit function per event of a map.
- *
- * @see {@link notifiers}
- */
+/** One emit function per event. See {@link notifiers}. */
 export type Notifiers<Events extends EventMap> = {
   [K in EventKey<Events>]: (...args: EmitArgs<Events, K>) => void;
 };
 
-/**
- * An object exposing one subscribe function per event of a map.
- *
- * @see {@link listeners}
- */
+/** One subscribe function per event. See {@link listeners}. */
 export type Listeners<Events extends EventMap> = {
   [K in EventKey<Events>]: (
     handler: (payload: Events[K]) => void,
@@ -261,19 +225,18 @@ export type Listeners<Events extends EventMap> = {
 };
 
 /**
- * Build a per-event emit object for a bridge, so call sites read as
- * `notify.load({ url })` instead of `bridge.emit('load', { url })`.
+ * Per-event emit functions: `notify.load({ url })` instead of
+ * `bridge.emit('load', { url })`. Each function is created once, so
+ * `notify.load` is referentially stable.
  *
- * This is an alternative to {@link Bridge.emit}, not a replacement. It is
- * implemented with a `Proxy`, which has two consequences worth knowing:
- * the resulting object cannot be tree-shaken, and a JavaScript caller
- * (without TypeScript checking the call) gets no error for a misspelled event
- * name — it silently emits an event nobody listens to. Prefer
- * {@link Bridge.emit} in library code and reserve this for application code
- * where the ergonomics are worth it.
+ * Built on a `Proxy`, which has consequences:
  *
- * Each per-event function is created once and reused, so `notify.load` is
- * referentially stable and safe to pass as a prop or effect dependency.
+ * - it cannot be tree-shaken;
+ * - a misspelled event name is only caught by TypeScript — from plain JS it
+ *   silently emits an event nobody listens to;
+ * - `then`, `toJSON` and `constructor` are not usable as event names here
+ *   (they return `undefined`), so that `await notify` and
+ *   `JSON.stringify(notify)` behave. Use {@link Bridge.emit} for those.
  */
 export function notifiers<Events extends EventMap>(bridge: Bridge<Events>): Notifiers<Events> {
   return proxyPerEvent<Notifiers<Events>>(
@@ -284,10 +247,8 @@ export function notifiers<Events extends EventMap>(bridge: Bridge<Events>): Noti
 }
 
 /**
- * Build a per-event subscribe object for a bridge, so call sites read as
- * `listen.ready(handler)` instead of `bridge.on('ready', handler)`.
- *
- * Carries the same trade-offs as {@link notifiers}.
+ * Per-event subscribe functions: `listen.ready(handler)` instead of
+ * `bridge.on('ready', handler)`. Same caveats as {@link notifiers}.
  */
 export function listeners<Events extends EventMap>(bridge: Bridge<Events>): Listeners<Events> {
   return proxyPerEvent<Listeners<Events>>(
@@ -297,9 +258,8 @@ export function listeners<Events extends EventMap>(bridge: Bridge<Events>): List
 }
 
 /**
- * Property names the runtime probes on arbitrary objects. Treating them as
- * events would make `JSON.stringify(notify)` emit a `toJSON` event, and
- * `await notify` emit `then` and never settle.
+ * Probed by the runtime on arbitrary objects. Treating them as events would
+ * make `await notify` never settle and `JSON.stringify(notify)` emit `toJSON`.
  */
 const RESERVED = new Set(['then', 'toJSON', 'constructor']);
 

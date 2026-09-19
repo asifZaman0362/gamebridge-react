@@ -1,9 +1,8 @@
 /**
  * @module bridge
  *
- * The typed bridge itself: a thin, strongly typed layer over an
- * {@link EventTransport} that adds an event map, buffering semantics,
- * one-shot subscriptions, disposers, error isolation, and optional logging.
+ * The typed event channel: an event map, per-event buffering, one-shot
+ * subscriptions, disposers and error isolation over an {@link EventTransport}.
  */
 
 import { defaultOnError } from './internal/report';
@@ -18,15 +17,11 @@ import type {
 import { GenericTransport, isCountable, type EventTransport } from './transport';
 
 /**
- * Any event map. Keys are event names; values are that event's payload type.
- * Use `void` for events that carry no payload. Both `type` aliases and
- * `interface` declarations are accepted.
+ * Event name to payload type. Use `void` for events without a payload.
+ * `type` and `interface` both work.
  *
  * ```ts
- * type Events = {
- *   start: { speed: number };
- *   ready: void;
- * };
+ * type Events = { start: { speed: number }; ready: void };
  * ```
  */
 export type EventMap = object;
@@ -34,174 +29,130 @@ export type EventMap = object;
 /** The string keys of an event map. */
 export type EventKey<Events extends EventMap> = keyof Events & string;
 
-/** A typed handler for a single event of an event map. */
+/** Handler for one event of a map. */
 export type Handler<Events extends EventMap, K extends EventKey<Events>> = (
   payload: Events[K],
 ) => void;
 
 /**
- * The payload argument list for an emit of event `K`: required when the
- * event carries a payload, optional when it is declared `void` (or otherwise
- * accepts `undefined`), so `emit('pause')` reads as it should.
+ * Argument list for `emit`: the payload is optional when the event is `void`
+ * (or otherwise accepts `undefined`), so `emit('pause')` type-checks.
  */
 export type EmitArgs<Events extends EventMap, K extends EventKey<Events>> =
   undefined extends Events[K] ? [payload?: Events[K]] : [payload: Events[K]];
 
-/** Removes a subscription. Safe to call more than once. */
+/** Removes a subscription. Calling it more than once is a no-op. */
 export type Unsubscribe = () => void;
 
 /**
- * How an event behaves when it is emitted with no subscriber attached.
+ * What happens to an emission nothing is listening to. The two sides of a
+ * bridge mount at different times, so this comes up constantly.
  *
- * Choosing per event matters because the two sides of a bridge typically
- * start at different times: the UI layer and the engine each mount when they
- * are ready, and either may emit before the other is listening.
- *
- * - `'none'` — fire and forget. If nothing is listening, the event is
- *   discarded. Correct for high-frequency streams, where a backlog is worse
+ * - `'none'` — dropped. For high-frequency streams, where a backlog is worse
  *   than a gap.
+ * - `'queue'` — kept until the next subscriber, delivered to it in order, then
+ *   cleared. For commands, which must run exactly once.
+ * - `'replay'` — the latest payload is kept and handed to every later
+ *   subscriber. For state, which anything mounting late needs.
  *
- * - `'queue'` — an emission that **no subscriber received** is retained and
- *   delivered, in order, to the next subscriber. The backlog is then cleared,
- *   so later subscribers do not receive it again. Correct for **commands**,
- *   which must happen exactly once. Emissions delivered live are not retained,
- *   so a subscriber attaching later does not replay commands another
- *   subscriber has already handled.
- *
- * - `'replay'` — the most recent payload is retained and delivered to *every*
- *   subscriber that attaches later, whether or not it was delivered live.
- *   Correct for **state**, where a component mounting at any time needs the
- *   current value.
- *
- * The distinction between `'queue'` and `'replay'` is the one most easily got
- * wrong, and it cuts both ways. Retaining every emission — including delivered
- * ones — makes a command run twice. Retaining only undelivered emissions makes
- * a late subscriber miss current state. Neither rule is right for both cases,
- * which is why they are separate modes.
+ * Gotcha: `'queue'` retains only emissions that **no consumer received**. If
+ * a subscriber is attached the emission is delivered and not kept, so a second
+ * subscriber attaching later gets nothing. That is right for a command and
+ * wrong for state — use `'replay'` for state.
  */
 export type BufferMode = 'none' | 'queue' | 'replay';
 
-/** Configuration for a single {@link Bridge}. */
+/** Options for {@link Bridge}. */
 export interface BridgeOptions<Events extends EventMap> {
   /**
-   * The backend that carries messages. Defaults to a {@link GenericTransport}.
-   * Pass an engine-provided emitter to reuse a bus the engine already owns.
+   * Backend that carries events. Defaults to a fresh {@link GenericTransport};
+   * pass an engine emitter to reuse one the engine already owns.
    */
   transport?: EventTransport;
 
-  /**
-   * Per-event buffering. Events not listed default to `'none'`.
-   *
-   * ```ts
-   * buffer: { load: 'queue', ready: 'replay' }
-   * ```
-   */
+  /** Per-event buffering. Unlisted events are `'none'`. */
   buffer?: Partial<Record<EventKey<Events>, BufferMode>>;
 
   /**
-   * Maximum retained payloads per `'queue'` event. When exceeded, the oldest
-   * is dropped. Bounds memory when a subscriber never attaches — important
-   * when payloads are large or the producer is fast. `0` disables retention
-   * for every `'queue'` event.
+   * Cap on retained payloads per `'queue'` event; past it, the oldest is
+   * dropped. `0` disables queueing entirely.
    *
    * @defaultValue 256
    */
   maxQueued?: number;
 
   /**
-   * Prefix applied to every event name before it reaches the transport.
-   *
-   * Not needed when each direction has its own bridge and transport, which is
-   * the recommended setup. It exists for the case where two bridges must
-   * share one transport: distinct namespaces keep identically named events on
-   * each from colliding.
+   * Prefix added to every event name on the transport. Only needed when two
+   * bridges share one transport and could otherwise collide on an event name.
    */
   namespace?: string;
 
   /**
-   * Label identifying this bridge in log records. {@link createBridgePair}
-   * sets `'toEngine'` and `'toApp'`.
+   * Name shown in log records.
    *
    * @defaultValue the `namespace`, or `'bridge'`
    */
   name?: string;
 
   /**
-   * Invoked when a subscriber throws, or when the transport itself fails
-   * during `emit` or `on`. Errors are always isolated so that one failing
-   * subscriber cannot prevent others from running and no failure escapes
-   * the bridge into the caller; this hook decides where it is reported.
+   * Called when a handler throws, or when the transport throws from `emit` or
+   * `on`. Failures never escape the bridge; this decides where they go.
+   * Receives the event name without the `namespace` prefix. If the hook itself
+   * throws, that is swallowed.
    *
-   * Receives the event name as declared in the map, without any `namespace`
-   * prefix. A hook that itself throws is swallowed.
-   *
-   * @defaultValue logs to the console
+   * @defaultValue `console.error`
    */
   onError?: (error: unknown, event: string) => void;
 }
 
-/** Per-subscription options. */
+/** Options for {@link Bridge.on}. */
 export interface ListenOptions {
-  /** `this` binding for the handler. */
+  /** `this` for the handler. */
   context?: object;
 
-  /** Remove the subscription after it has been invoked once. */
+  /** Unsubscribe after the first invocation. */
   once?: boolean;
 
   /**
-   * Name for this handler in log records.
-   *
-   * Without it, the handler's own function name is used, which is enough for
-   * a named function or one assigned to a `const`. Supply a label for
-   * anonymous handlers, or anywhere minification would rename them.
+   * Name for this handler in log records. Defaults to the function's own
+   * name, which minifiers rename — set this where the name must be stable.
    */
   label?: string;
 
   /**
-   * Whether this subscriber *consumes* a `'queue'` event.
+   * Whether this subscriber consumes a `'queue'` backlog. Set `false` for an
+   * observer (a debug listener, say): it sees live emissions but does not
+   * drain the backlog on attach, and emissions keep queueing for the real
+   * consumer while only observers are attached.
    *
-   * Defaults to `true`, because retaining a backlog is the entire purpose of
-   * declaring an event `'queue'`. Set to `false` for an observer — a
-   * diagnostic listener, say — that should see live emissions but must not
-   * consume a backlog another subscriber is waiting for. An observer does not
-   * receive the backlog on attach, and while only observers are attached,
-   * emissions are still retained for the consumer that mounts later.
+   * Ignored for `'none'` and `'replay'` events.
    *
-   * Has no effect on `'none'` or `'replay'` events.
+   * @defaultValue true
    */
   collectWaiting?: boolean;
 }
 
-/** One live subscription, as recorded by the bridge. */
+/** One live subscription. */
 interface Subscription {
-  /** The function actually registered with the transport. */
+  /** What was registered with the transport — a wrapper, not the caller's handler. */
   registered: Function;
   context: object | undefined;
-  /** Name shown in log records. */
   label: string;
-  /** Whether this subscriber counts as a consumer for `'queue'` semantics. */
   consumes: boolean;
 }
 
-/**
- * Derive a display name for a handler.
- *
- * Function names survive for named functions and for arrow functions assigned
- * to a binding, which covers most handlers written by hand. Minifiers rename
- * them, so `label` exists for cases where the name has to be stable.
- */
+/** Display name for a handler; `label` exists because minifiers strip these. */
 function nameOf(handler: Function): string {
   const name = handler.name;
   return name === undefined || name === '' ? '(anonymous)' : name;
 }
 
 /**
- * A typed, buffered event channel over a pluggable transport.
+ * A typed, buffered, one-directional event channel.
  *
- * A bridge carries events in **one direction**. For the usual two-way case,
- * use {@link createBridgePair}, which gives each direction its own bridge and
- * its own transport so that identically named events on the two sides cannot
- * trigger each other.
+ * For the usual two-way setup use {@link createBridgePair}, which gives each
+ * direction its own bridge and transport, so same-named events on the two
+ * sides cannot trigger each other.
  *
  * @example
  * ```ts
@@ -223,10 +174,10 @@ function nameOf(handler: Function): string {
  * @typeParam Events - Map of event name to payload type.
  */
 export class Bridge<Events extends EventMap> {
-  /** The backend carrying this bridge's events. */
+  /** Backend carrying this bridge's events. */
   readonly transport: EventTransport;
 
-  /** Label used in log records. */
+  /** Name shown in log records. */
   readonly name: string;
 
   readonly #buffer: Partial<Record<string, BufferMode>>;
@@ -234,34 +185,23 @@ export class Bridge<Events extends EventMap> {
   readonly #namespace: string;
   readonly #onError: (error: unknown, event: string) => void;
 
-  /** Backlog for `'queue'` events, keyed by namespaced event name. */
+  /** Backlog per `'queue'` event, keyed by namespaced name. */
   readonly #queued = new Map<string, unknown[]>();
 
-  /** Most recent payload for `'replay'` events, keyed by namespaced name. */
+  /** Latest payload per `'replay'` event, keyed by namespaced name. */
   readonly #retained = new Map<string, unknown>();
 
   /**
-   * Subscriptions made through this bridge, per namespaced event name, in
-   * subscription order.
-   *
-   * Tracked here rather than read from the transport for two reasons: the
-   * transport contract does not require a listener count, and `'queue'`
-   * semantics need to know at emit time whether anything will receive the
-   * event. Keeping descriptors rather than a bare count also lets logging
-   * name the subscribed handlers.
-   *
-   * A bridge cannot see subscriptions registered directly on a shared
-   * transport, so this records only what the bridge itself registered.
+   * Subscriptions made through this bridge, per namespaced event. Tracked here
+   * because the transport contract has no listener count and `'queue'` needs
+   * one at emit time. Listeners registered directly on a shared transport are
+   * invisible to the bridge.
    */
   readonly #subscriptions = new Map<string, Subscription[]>();
 
   /**
-   * Maps a caller's handler to the function actually registered with the
-   * transport. They differ for `once` subscriptions, where the registered
-   * function is a self-removing wrapper. Without this, `off(event, handler)`
-   * could not find the wrapper to remove.
-   *
-   * A list per (handler, event) pair supports the same handler being
+   * Caller's handler to what was actually registered (a wrapper), so
+   * `off(event, handler)` can find it. A list, because the same handler may be
    * subscribed to the same event more than once.
    */
   readonly #registered = new Map<string, Map<Function, Function[]>>();
@@ -272,10 +212,10 @@ export class Bridge<Events extends EventMap> {
 
   constructor(options: BridgeOptions<Events> = {}) {
     this.#onError = options.onError ?? defaultOnError;
-    // Every handler is registered with the transport through an isolating
-    // wrapper (see `on`), so subscriber failures are caught by the bridge
-    // whatever the transport does. The default transport additionally reports
-    // failures of anything registered on it directly, outside the bridge.
+    // Handlers reach the transport through an isolating wrapper (see `on`), so
+    // subscriber failures are caught here whatever the transport does. The
+    // default transport also reports failures of listeners registered on it
+    // directly, outside the bridge.
     this.transport =
       options.transport ?? new GenericTransport((error, key) => this.#reportError(error, key));
     this.#buffer = options.buffer ?? {};
@@ -291,23 +231,10 @@ export class Bridge<Events extends EventMap> {
   /* ---------------------------------------------------------------- */
 
   /**
-   * Start reporting activity on this bridge to `logger`.
-   *
-   * Without `verbose`, one record is written per emission, carrying the bus,
-   * event name, payload, and what became of the event:
-   *
-   * ```json
-   * { "bus": "toEngine", "event": "load",
-   *   "payload": { "url": "/scene.json" }, "disposition": "queued" }
-   * ```
-   *
-   * `disposition` is what usually answers the question being investigated:
-   * `delivered` means something received it, while `dropped`, `queued`, and
-   * `retained` each mean nothing did, and say what happened to it instead.
-   *
-   * With `verbose`, every record also carries a listener count, and
-   * subscription lifecycle is reported too — subscribe, unsubscribe, backlog
-   * drains, replays, clears, and evictions.
+   * Start logging to `logger`. One record per emission, carrying bus, event,
+   * payload and `disposition`: `delivered`, or `dropped` / `queued` /
+   * `retained` when nothing was listening. With `verbose`, subscription
+   * lifecycle is logged too and every record lists the attached handlers.
    *
    * Calling this again replaces the previous logger and options.
    */
@@ -317,14 +244,14 @@ export class Bridge<Events extends EventMap> {
     this.#formatPayload = options.formatPayload;
   }
 
-  /** Stop reporting activity. Safe to call when logging is already off. */
+  /** Stop logging. Safe to call when logging is already off. */
   disableLogging(): void {
     this.#logger = undefined;
     this.#verbose = false;
     this.#formatPayload = undefined;
   }
 
-  /** Whether a logger is currently attached. */
+  /** Whether a logger is attached. */
   get isLogging(): boolean {
     return this.#logger !== undefined;
   }
@@ -334,15 +261,10 @@ export class Bridge<Events extends EventMap> {
   /* ---------------------------------------------------------------- */
 
   /**
-   * Emit an event.
+   * Emit an event. Handlers run synchronously, before this returns. Omit the
+   * payload for `void` events.
    *
-   * Depending on the event's {@link BufferMode}, the payload may also be
-   * retained for subscribers that attach later.
-   *
-   * Handlers run synchronously, before this method returns. The payload
-   * argument may be omitted for events declared `void`.
-   *
-   * Never throws: subscriber and transport failures are routed to `onError`.
+   * Never throws: handler and transport failures go to `onError`.
    */
   emit<K extends EventKey<Events>>(event: K, ...args: EmitArgs<Events, K>): void {
     const payload = args[0] as Events[K];
@@ -356,9 +278,9 @@ export class Bridge<Events extends EventMap> {
       this.#retained.set(key, payload);
       if (subscribers === 0) disposition = 'retained';
     } else if (mode === 'queue' && !this.#hasConsumer(subscriptions)) {
-      // Only retain what no consumer received. Retaining delivered commands
-      // too would make a later subscriber re-run work already done. Observers
-      // (`collectWaiting: false`) still get the live copy but do not count.
+      // Retain only what no consumer received, or a later subscriber would
+      // re-run a command already handled. Observers (`collectWaiting: false`)
+      // get the live copy but do not count.
       if (this.#maxQueued > 0) {
         const backlog = this.#queued.get(key);
         if (backlog === undefined) {
@@ -385,8 +307,8 @@ export class Bridge<Events extends EventMap> {
       this.#write(record);
     }
 
-    // A transport can fail — an engine-owned emitter that has already been
-    // destroyed, say. That is the transport's failure, not the emitter's.
+    // An engine-owned emitter may already be destroyed; that is the
+    // transport's failure, not the emitter's.
     try {
       this.transport.emit(key, payload);
     } catch (error) {
@@ -395,19 +317,20 @@ export class Bridge<Events extends EventMap> {
   }
 
   /**
-   * Subscribe to an event.
+   * Subscribe. Returns a disposer that is safe to call more than once.
    *
-   * If the event is `'replay'` and a payload has been retained, the handler is
-   * invoked immediately with it. If the event is `'queue'` and a backlog
-   * exists, the handler is invoked once per retained payload, in emission
-   * order, and the backlog is then cleared — unless `collectWaiting` is
-   * `false`.
+   * On attach, a `'replay'` event with a retained payload invokes the handler
+   * immediately; a `'queue'` event with a backlog invokes it once per queued
+   * payload, in order, then clears the backlog (unless `collectWaiting` is
+   * `false`).
    *
-   * Never throws: a failing handler or transport is routed to `onError`, and
-   * if the transport refuses the subscription the returned disposer is a
-   * no-op.
+   * Never throws. If the transport refuses the subscription, the error goes
+   * to `onError` and the returned disposer is a no-op.
    *
-   * @returns A disposer. Calling it more than once is safe.
+   * Gotchas with `once`: on a `'replay'` event holding a payload, the handler
+   * fires with it right away and the subscription is over. On a `'queue'`
+   * event it takes only the first queued payload and leaves the rest for the
+   * next subscriber.
    */
   on<K extends EventKey<Events>>(
     event: K,
@@ -418,15 +341,12 @@ export class Bridge<Events extends EventMap> {
     const { context, once = false, collectWaiting = true, label } = options;
     const mode = this.#modeOf(event);
 
-    // Catch a late subscriber up on retained state.
     if (mode === 'replay' && this.#retained.has(key)) {
       this.#action(event, 'replay');
       this.#invoke(handler, this.#retained.get(key) as Events[K], context, key);
       if (once) return () => {};
     }
 
-    // A one-shot consumer takes exactly one command from the backlog and
-    // leaves the rest for whoever subscribes next.
     if (mode === 'queue' && collectWaiting && once) {
       const first = this.#takeQueued(key, 1);
       if (first.length > 0) {
@@ -437,9 +357,8 @@ export class Bridge<Events extends EventMap> {
     }
 
     // Every handler goes through an isolating wrapper, so a throwing
-    // subscriber is contained whatever the transport does with exceptions.
-    // `once` is implemented here rather than required of transports, so that
-    // any object with emit/on/off qualifies as a backend.
+    // subscriber is contained whatever the transport does. `once` is built
+    // here rather than required of transports, so any emit/on/off object works.
     let registered: (payload: Events[K]) => void;
     if (once) {
       registered = (payload: Events[K]) => {
@@ -468,9 +387,8 @@ export class Bridge<Events extends EventMap> {
     });
     this.#action(event, 'subscribe');
 
-    // Drain the backlog only now that the handler is registered: a command
-    // emitted from inside a drained handler then reaches it live, instead of
-    // being re-queued behind a subscriber that is about to exist.
+    // Drain only after registering: a command emitted from inside a drained
+    // handler then reaches it live instead of being re-queued.
     if (mode === 'queue' && collectWaiting) {
       const pending = this.#takeQueued(key);
       if (pending.length > 0) {
@@ -489,10 +407,7 @@ export class Bridge<Events extends EventMap> {
     };
   }
 
-  /**
-   * Subscribe for a single occurrence. Equivalent to
-   * `on(event, handler, { once: true })`.
-   */
+  /** Shorthand for `on(event, handler, { once: true })`. */
   once<K extends EventKey<Events>>(
     event: K,
     handler: Handler<Events, K>,
@@ -502,20 +417,16 @@ export class Bridge<Events extends EventMap> {
   }
 
   /**
-   * Remove a subscription.
+   * Remove a subscription. Prefer the disposer returned by {@link Bridge.on}.
    *
-   * Prefer the disposer returned by {@link Bridge.on}, which needs no
-   * bookkeeping at the call site. This method exists for cases where the
-   * disposer is inconvenient to keep.
-   *
-   * @param handler - Omit to remove every subscription for `event`.
+   * @param handler - Omit to remove every subscription this bridge made for
+   * `event`. Listeners the engine registered directly on a shared transport
+   * are never touched.
    */
   off<K extends EventKey<Events>>(event: K, handler?: Handler<Events, K>, context?: object): void {
     const key = this.#key(event);
 
     if (handler === undefined) {
-      // Remove only what this bridge registered. A wholesale `transport.off(key)`
-      // would also strip listeners the engine itself holds on a shared emitter.
       const existing = this.#subscriptions.get(key) ?? [];
       this.#registered.delete(key);
       this.#subscriptions.delete(key);
@@ -544,13 +455,12 @@ export class Bridge<Events extends EventMap> {
   }
 
   /**
-   * Discard buffered payloads.
+   * Discard buffered payloads. Subscriptions are untouched.
    *
-   * Call this when the engine side is torn down and rebuilt, so that a
-   * restarted engine does not receive commands intended for the previous
-   * instance, or replay state that is no longer accurate.
+   * Use it when the engine is rebuilt: a queued command or retained state
+   * meant for the old instance must not reach the new one.
    *
-   * @param event - Omit to clear every event's buffers.
+   * @param event - Omit to clear every event.
    */
   clear(event?: EventKey<Events>): void {
     if (event === undefined) {
@@ -575,22 +485,13 @@ export class Bridge<Events extends EventMap> {
   }
 
   /**
-   * Remove every subscription this bridge holds and discard every buffered
-   * payload, in one call.
+   * Remove every subscription this bridge made and discard every buffer.
    *
-   * This is the "engine rebuilt" or "module unloaded" operation. An engine
-   * that is torn down and recreated — a hot reload, a React Strict Mode
-   * remount — must neither be driven by handlers registered for its
-   * predecessor nor receive commands and state intended for it. Prefer
-   * {@link Bridge.clear} when only the buffers are stale and the subscribers
-   * are still valid.
+   * For "this module is going away": a hot reload, a route change out of the
+   * game. Use {@link Bridge.clear} when only the buffers are stale.
    *
-   * Only subscriptions made through this bridge are removed; listeners the
-   * engine registered directly on a shared transport are untouched. Logging
-   * is left as configured, so the disposal itself is visible in the log.
-   *
-   * The bridge remains usable afterwards: new subscriptions and emissions
-   * behave as on a fresh instance.
+   * Listeners the engine registered directly on a shared transport are left
+   * alone, logging stays on, and the bridge is still usable afterwards.
    */
   dispose(): void {
     for (const key of [...this.#subscriptions.keys()]) {
@@ -603,47 +504,34 @@ export class Bridge<Events extends EventMap> {
   /* diagnostics                                                      */
   /* ---------------------------------------------------------------- */
 
-  /**
-   * Number of payloads currently retained for a `'queue'` event, or `0` for
-   * events in any other mode.
-   */
+  /** Payloads currently queued for a `'queue'` event; `0` for other modes. */
   queuedCount(event: EventKey<Events>): number {
     return this.#queued.get(this.#key(event))?.length ?? 0;
   }
 
-  /** Whether a `'replay'` event currently holds a retained payload. */
+  /** Whether a `'replay'` event holds a retained payload. */
   hasRetained(event: EventKey<Events>): boolean {
     return this.#retained.has(this.#key(event));
   }
 
   /**
-   * Number of subscriptions this bridge holds for an event.
-   *
-   * Counts what the bridge registered. Subscriptions made directly on a
-   * shared transport are not visible here; use
-   * {@link Bridge.transportListenerCount} for the transport's own view.
+   * Subscriptions this bridge holds for `event`. Does not see listeners
+   * registered directly on a shared transport; use
+   * {@link Bridge.transportListenerCount} for those.
    */
   listenerCount(event: EventKey<Events>): number {
     return this.#subscriptions.get(this.#key(event))?.length ?? 0;
   }
 
   /**
-   * Names of the handlers subscribed to an event, in subscription order.
-   *
-   * Useful when an event fires but nothing seems to happen: the list shows
-   * whether the handler you expect is actually attached. Names come from the
-   * handler functions themselves unless a `label` was supplied when
-   * subscribing.
+   * Handler names for `event`, in subscription order. Useful when an event
+   * fires and nothing seems to happen.
    */
   listenerNames(event: EventKey<Events>): string[] {
     return this.#namesFor(this.#key(event));
   }
 
-  /**
-   * The transport's own listener count, when it can report one; `undefined`
-   * otherwise. Differs from {@link Bridge.listenerCount} only when something
-   * subscribes to the transport without going through this bridge.
-   */
+  /** The transport's own listener count, or `undefined` if it cannot report one. */
   transportListenerCount(event: EventKey<Events>): number | undefined {
     return isCountable(this.transport) ? this.transport.listenerCount(this.#key(event)) : undefined;
   }
@@ -656,7 +544,6 @@ export class Bridge<Events extends EventMap> {
     return this.#namespace === '' ? event : `${this.#namespace}${event}`;
   }
 
-  /** Whether any attached subscriber counts as a consumer of a `'queue'` event. */
   #hasConsumer(subscriptions: Subscription[] | undefined): boolean {
     if (subscriptions === undefined) return false;
     for (const subscription of subscriptions) if (subscription.consumes) return true;
@@ -679,8 +566,8 @@ export class Bridge<Events extends EventMap> {
   }
 
   #modeOf(event: string): BufferMode {
-    // Own-property lookup, so an event named like an Object.prototype member
-    // ('constructor', 'toString') cannot pick up a prototype value.
+    // Own-property lookup, so an event named 'constructor' or 'toString'
+    // cannot pick up a value from Object.prototype.
     return Object.prototype.hasOwnProperty.call(this.#buffer, event)
       ? (this.#buffer[event] ?? 'none')
       : 'none';
@@ -712,7 +599,7 @@ export class Bridge<Events extends EventMap> {
   }
 
   #write(record: EmitRecord | ActionRecord): void {
-    // A logging failure must never surface as an application failure.
+    // A broken logger must never become an application failure.
     try {
       this.#logger?.debug(record);
     } catch {
@@ -746,12 +633,8 @@ export class Bridge<Events extends EventMap> {
   }
 
   /**
-   * Record a subscriber failure and hand it to `onError`. Always logged when
-   * a logger is attached, verbose or not, since a silently failing subscriber
-   * is exactly what logging is turned on to find.
-   *
-   * The hook is itself guarded: an error reporter that is momentarily broken
-   * must not turn a contained subscriber failure into an application failure.
+   * Log the failure (verbose or not — a silently failing subscriber is what
+   * logging is for) and hand it to `onError`, which is itself guarded.
    */
   #reportError(error: unknown, key: string): void {
     const event = this.#unkey(key);
@@ -800,16 +683,14 @@ export class Bridge<Events extends EventMap> {
     this.#forget(key, handler, registered);
     const released = this.#release(key, registered as Function, context);
     this.#safely(() => this.transport.off(key, registered as (payload: unknown) => void, context));
-    // A `once` subscription that already fired has nothing left to remove;
-    // do not report a second unsubscribe for it.
+    // A fired `once` subscription has nothing left to remove; don't log a
+    // second unsubscribe for it.
     if (released) this.#action(event, 'unsubscribe');
   }
 
   /**
-   * Teardown must never throw. A UI framework may unmount a subtree while the
-   * engine is mid-teardown, at which point an engine-owned transport can
-   * already be destroyed and its `off` will throw. Swallowing that keeps an
-   * unmount path from failing over a listener that is going away regardless.
+   * Teardown must never throw: a UI may unmount while the engine is mid-
+   * teardown, when an engine-owned transport's `off` can already throw.
    */
   #safely(action: () => void): void {
     try {

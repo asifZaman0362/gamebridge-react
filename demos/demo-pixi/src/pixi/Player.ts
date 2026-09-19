@@ -109,6 +109,8 @@ export class Player {
   }
 
   private publishStats(): void {
+    // Always the whole snapshot: `statsChanged` is `'replay'`, which keeps only
+    // the latest payload, so a partial update would leave a late HUD with stale fields.
     publishPlayerStats({
       health: this.stats.health,
       score: this.stats.score,

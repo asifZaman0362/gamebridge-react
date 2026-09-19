@@ -32,7 +32,12 @@ export type AchievementEventsToApp = {
  */
 const achievements = createBridge<AchievementEventsToApp>({
   name: "achievements",
-  buffer: { unlocked: "queue", statusChanged: "replay" },
+  buffer: {
+    // A toast must show exactly once, even if the drawer is unmounted at unlock time.
+    unlocked: "queue",
+    // The drawer needs the current list whenever it mounts.
+    statusChanged: "replay",
+  },
 });
 
 /**

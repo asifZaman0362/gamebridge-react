@@ -8,12 +8,11 @@ export type BridgeEmit<Events extends EventMap> = <K extends EventKey<Events>>(
 ) => void;
 
 /**
- * A stable emit function for `bridge`.
+ * A referentially stable emit function for `bridge`.
  *
- * `bridge.emit` can already be called directly; this exists for the case
- * where an emit function is passed down as a prop or dependency and needs a
- * referentially stable identity across renders, so it doesn't invalidate a
- * memoized child or another hook's dependency array.
+ * `bridge.emit` can be called directly; use this when the emit function is
+ * passed as a prop or listed as a dependency, so it does not invalidate a
+ * memoized child or another hook on every render.
  *
  * ```tsx
  * const emit = useBridgeEmit(toEngine);

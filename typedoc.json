@@ -1,0 +1,11 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPointStrategy": "packages",
+  "entryPoints": ["packages/core", "packages/react"],
+  "out": "docs",
+  "name": "gamebridge-react",
+  "readme": "README.md",
+  "skipErrorChecking": true,
+  "excludeInternal": true,
+  "categorizeByGroup": true
+}

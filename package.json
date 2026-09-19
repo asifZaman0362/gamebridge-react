@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "pnpm -r --parallel --filter=./packages/* dev",
     "build": "pnpm -r --filter=./packages/* build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "docs": "pnpm build && typedoc"
   },
   "keywords": [
     "event-bridge",
@@ -16,7 +17,7 @@
     "react",
     "events"
   ],
-  "author": "Asif Zaman <asifzaman0362@gmail.com>",
+  "author": "Asif Zaman <zero362001@gmail.com>",
   "license": "MIT",
   "devEngines": {
     "packageManager": {
@@ -27,6 +28,7 @@
   },
   "packageManager": "pnpm@12.4.2",
   "devDependencies": {
+    "typedoc": "^0.28.20",
     "typescript": "^5.6.0"
   }
 }

@@ -1,40 +1,35 @@
 /**
  * @module logging
  *
- * Optional diagnostic logging.
- *
- * Logging answers the questions that are otherwise awkward to inspect from
- * outside a bridge: was this event actually emitted, did anything receive it,
- * and if not, was it dropped, queued, or retained?
- *
- * It is off by default and costs a single null check per emit when disabled,
- * which matters because emit sits on a per-frame path in most engines.
+ * Optional diagnostics: was this event emitted, did anything receive it, and
+ * if not, what happened to it? Off by default; when off it costs one null
+ * check per emit.
  */
 
 /**
- * The logging sink.
- *
- * Deliberately one method taking a structured object rather than a formatted
- * string, so records can be forwarded to a structured logger, filtered, or
- * serialised however the host application prefers. Use {@link consoleLogger}
- * for a pretty-printed default.
+ * The sink. One method taking a structured object rather than a string, so
+ * records can be forwarded, filtered or serialised however the application
+ * likes. {@link consoleLogger} is a ready-made one.
  */
 export interface Logger {
   debug: (data: object) => void;
 }
 
-/** What happened to an emitted event. */
+/** What became of an emission. */
 export type Disposition =
   /** At least one subscriber received it. */
   | 'delivered'
-  /** No subscriber; retained for the next one to collect (`queue` mode). */
+  /** No subscriber; kept for the next one (`'queue'`). */
   | 'queued'
-  /** No subscriber; retained as current state (`replay` mode). */
+  /** No subscriber; kept as current state (`'replay'`). */
   | 'retained'
-  /** No subscriber and no buffering; discarded (`none` mode). */
+  /** No subscriber, no buffering; gone (`'none'`). */
   | 'dropped';
 
-/** Lifecycle actions reported only when `verbose` is enabled. */
+/**
+ * Lifecycle actions. Logged only with `verbose`, except `error`, which is
+ * always logged while a logger is attached.
+ */
 export type LogAction =
   | 'subscribe'
   | 'unsubscribe'
@@ -44,32 +39,28 @@ export type LogAction =
   | 'evict'
   | 'error';
 
-/** Record emitted for every `emit` call while logging is enabled. */
+/** Logged for every `emit` while logging is on. */
 export interface EmitRecord {
   bus: string;
   event: string;
   payload: unknown;
   disposition: Disposition;
   /**
-   * Names of the handlers currently subscribed to this event, in subscription
-   * order. Present only when `verbose` is enabled.
-   *
-   * A handler's name comes from the function itself, so a named function or a
-   * function assigned to a `const` identifies itself. Anonymous handlers show
-   * as `'(anonymous)'`; pass `label` when subscribing to name them explicitly,
-   * which also survives minification.
+   * Attached handler names, in subscription order. Only with `verbose`.
+   * Anonymous handlers show as `'(anonymous)'`; pass `label` when subscribing
+   * to name them.
    */
   listeners?: string[];
 }
 
-/** Record emitted for lifecycle events while `verbose` is enabled. */
+/** Logged for lifecycle actions. */
 export interface ActionRecord {
   bus: string;
   event: string;
   action: LogAction;
-  /** Handlers subscribed after this action, in subscription order. */
+  /** Handlers attached after this action, in subscription order. */
   listeners?: string[];
-  /** Number of payloads involved, for `drain` and `evict`. */
+  /** Payloads involved, for `drain` and `evict`. */
   count?: number;
   /** Failure message, for `error`. */
   error?: string;
@@ -81,20 +72,18 @@ export type LogRecord = EmitRecord | ActionRecord;
 /** Options for {@link Bridge.enableLogging}. */
 export interface LoggingOptions {
   /**
-   * Also report subscription lifecycle — subscribe, unsubscribe, backlog
-   * drains, replays, clears, evictions — and list the subscribed handlers on
-   * every record.
-   *
-   * Leave off to log emissions only, which is usually enough to tell whether
-   * an event fired and whether anything was listening.
+   * Also log subscribe, unsubscribe, drain, replay, clear and evict, and list
+   * the attached handlers on every record. Emissions alone are usually enough
+   * to tell whether an event fired and whether anything was listening.
    *
    * @defaultValue false
    */
   verbose?: boolean;
 
   /**
-   * Transform a payload before it enters a log record. Use it to trim large
-   * payloads, or return `undefined` to omit them entirely.
+   * Transform a payload before it is logged: trim a large one, or return
+   * `undefined` to omit it. Affects only the log record, never what
+   * subscribers receive.
    *
    * ```ts
    * bridge.enableLogging(consoleLogger, {
@@ -102,33 +91,24 @@ export interface LoggingOptions {
    *     event === 'loadDocument' ? '[omitted]' : payload,
    * });
    * ```
-   *
-   * @defaultValue the payload is logged unchanged
    */
   formatPayload?: (payload: unknown, event: string) => unknown;
 }
 
 /**
- * Serialise a value to pretty-printed JSON without throwing on input a plain
- * `JSON.stringify` cannot handle.
+ * `JSON.stringify` that does not throw.
  *
- * Event payloads routinely carry engine objects — scene nodes, class
- * instances, anything holding a back-reference to its parent — so circular
- * structures are the norm rather than an edge case. A logger that throws on
- * them would turn a diagnostic aid into a crash.
+ * Payloads often carry engine objects with back-references, so cycles are
+ * normal. Circular references become `"[Circular]"`, functions `"[Function]"`,
+ * `Error`s `{ name, message }`, and `BigInt` / `Symbol` strings. An object
+ * referenced twice without a cycle is written out twice.
  *
- * Circular references become `"[Circular]"`, functions become `"[Function]"`,
- * `Error`s become `{ name, message }`, and `BigInt` and `Symbol` become
- * strings. An object referenced twice without a cycle — a config shared by
- * two entities, say — is serialised in full both times.
- *
- * If the value still cannot be serialised (a `toJSON` or getter that throws),
- * the failure itself is returned as a string rather than propagated.
+ * If serialisation still fails (a `toJSON` or getter that throws), the error
+ * message is returned as a string instead.
  */
 export function safeStringify(value: unknown, indent = 2): string {
-  // The chain of objects enclosing the value currently being serialised. Only
-  // a reference back into this chain is a cycle; a reference to something
-  // already serialised elsewhere is merely shared.
+  // Only a reference back into the chain of enclosing objects is a cycle; a
+  // reference to something serialised elsewhere is merely shared.
   const ancestors: object[] = [];
 
   try {
@@ -164,23 +144,13 @@ interface ConsoleLike {
 }
 
 /**
- * A ready-made {@link Logger} that pretty-prints each record as JSON.
+ * A {@link Logger} that pretty-prints each record as JSON via `console.debug`.
+ *
+ * Gotcha: browser devtools hide `console.debug` at the default log level.
+ * Enable "Verbose" (Chrome) or "Debug" (Firefox) to see the output.
  *
  * ```ts
- * import { consoleLogger } from '@gamebridge-react/core';
- *
  * bridge.enableLogging(consoleLogger);
- * ```
- *
- * Output for a single emission:
- *
- * ```json
- * {
- *   "bus": "toEngine",
- *   "event": "load",
- *   "payload": { "url": "/scene.json" },
- *   "disposition": "queued"
- * }
  * ```
  */
 export const consoleLogger: Logger = {

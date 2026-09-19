@@ -9,6 +9,8 @@ const INITIAL_STATS: PlayerStatsSnapshot = { health: 100, score: 0, steps: 0 };
 export default function Hud() {
   const [stats, setStats] = useState<PlayerStatsSnapshot>(INITIAL_STATS);
 
+  // `statsChanged` is `'replay'`, so a HUD mounting mid-level gets the current
+  // stats at once instead of waiting for the next change.
   useBridgeEvent(playerStatsToApp, "statsChanged", setStats, { label: "Hud" });
 
   return (

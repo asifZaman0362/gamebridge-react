@@ -2,8 +2,23 @@
   "name": "@gamebridge-react/core",
   "version": "0.1.0",
   "description": "Typed, fault-tolerant event bridge between declarative UI and imperative engines.",
+  "keywords": ["event-bridge", "phaser", "pixi", "events", "game", "canvas"],
+  "homepage": "https://github.com/asifZaman0362/gamebridge-react/tree/main/packages/core#readme",
+  "bugs": "https://github.com/asifZaman0362/gamebridge-react/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/asifZaman0362/gamebridge-react.git",
+    "directory": "packages/core"
+  },
   "type": "module",
   "license": "MIT",
+  "author": "Asif Zaman <zero362001@gmail.com>",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -28,6 +43,6 @@
   "devDependencies": {
     "tsup": "^8.5.1",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^5.0.1"
   }
 }

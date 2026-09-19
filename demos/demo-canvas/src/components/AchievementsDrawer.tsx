@@ -14,12 +14,16 @@ export default function AchievementsDrawer() {
     description: string;
   } | null>(null);
 
+  // `statusChanged` is `'replay'`: the full list arrives on mount, before any
+  // scene has run.
   useBridgeEvent(
     achievementsToApp,
     "statusChanged",
     ({ entries }) => setView(entries),
     { label: "AchievementsDrawer" },
   );
+  // `unlocked` is `'queue'`: an unlock that fires while the drawer is unmounted
+  // shows once on the next mount, and never again after that.
   useBridgeEvent(
     achievementsToApp,
     "unlocked",
