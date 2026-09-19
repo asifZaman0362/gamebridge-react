@@ -25,6 +25,8 @@ export default class MainMenu extends Phaser.Scene {
     this.createTitle(width, height);
     this.createHighScore(width, height);
     this.createStartPrompt(width, height);
+
+    this.input.once("pointerdown", () => this.scene.start("LevelLava"));
   }
 
   private createDriftingGrid(width: number, height: number) {
